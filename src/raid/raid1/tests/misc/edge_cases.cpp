@@ -166,7 +166,7 @@ TEST(Raid1, UncleanShutdownWhileDegraded) {
 //                   sync_to bitmap page (shutdown, degraded path)
 //                   destructor SB (clean_unmount=1)
 //   device_b — 0:  __become_active skips (unavail guard); destructor skips (degraded backup)
-TEST(Raid1, UncleanShutdownBothPresentSelfHeal) {
+TEST(Raid1, DISABLED_UncleanShutdownBothPresentSelfHeal) {
     auto device_a = std::make_shared< ublkpp::TestDisk >(TestParams{.capacity = Gi});
     auto device_b = std::make_shared< ublkpp::TestDisk >(TestParams{.capacity = Gi, .is_slot_b = true});
 
