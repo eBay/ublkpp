@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.40.0] - Unreleased
+
+### Changed
+
+- **CraftDisk awaits CRAFT verbs directly** (requires `craft_client >= 0.2.0`, whose verbs now return the
+  freestanding `sisl::async::light_task`): `async_iov` co_awaits `craft::read`/`craft::write` in its own frame,
+  and the disk_task continuation carries the result to `ublksrv_complete_io`. The `run_craft_io` exec::task
+  shim, its `sisl::async::detach` launch, and the per-IO `cqe_state` rendezvous are deleted — the framework
+  boundary they bridged no longer exists. `prepare_for_async` is now documented (upstream) as part of the
+  data-path contract: unbound, verbs resume their awaiter on a transport-internal thread; `CraftDisk::prepare`
+  always binds the queue's ring, unchanged.
+- **MockUblksrv is continuation-based**: each submit wraps `async_iov` in a recorder coroutine whose tail
+  records `{tag, result}` (mirroring `__handle_io_async`), delivered exactly once by `poll()`/`inject_cqe()`.
+  The post-batch sweep and per-CQE tag attribution are gone, fixing a latent cross-poll double-report and
+  stranded synchronous completions; the fio engine's sync-completion shortcut is removed accordingly.
+
 ## [0.36.2] - 2026-09-21
 
 ### Fixed

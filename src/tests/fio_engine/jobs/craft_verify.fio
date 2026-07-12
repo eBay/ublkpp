@@ -1,0 +1,17 @@
+# CRAFT on-ring transport under fio at depth. disk_type=craft is a 3-replica in-process reference cluster (no
+# backing files, no server, no kernel); CraftDisk::prepare binds the client to the engine's io_uring, so at
+# iodepth=32 many replica legs are in flight together -- the QD>1 scatter CRAFT correctness is emergent from.
+# write-then-verify with a crc32c header proves every block reads back exactly what was written, over the ring.
+[global]
+ioengine=external:${ENGINE_SO}
+disk_type=craft
+direct=1
+bs=4k
+iodepth=32
+verify=crc32c
+verify_fatal=1
+time_based=0
+
+[craft-write-verify]
+rw=write
+size=32m

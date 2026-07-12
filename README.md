@@ -4,25 +4,31 @@
 [![CodeCov](https://codecov.io/gh/ebay/ublkpp/graph/badge.svg?token=2N5W3458RK)](https://codecov.io/gh/ebay/ublkpp)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-> A high-performance C++23 library providing RAID0/1/10 support for Linux's userspace block (ublk) driver
+> A high-performance C++23 library for Linux's userspace block (ublk) driver, featuring **CraftDisk** — a
+> quorum-replicated block device — alongside classic RAID0/1/10.
 
 ## 🚀 Features
 
-- **RAID Support**: Full implementation of RAID0 (striping), RAID1 (mirroring), and RAID10 (stripe of mirrors)
+- **CraftDisk — quorum-replicated block device (flagship)**: A `/dev/ublkbN` backed by a CRAFT replica set.
+  Writes broadcast to N replicas and commit at a **quorum** (never waiting for the slowest); reads route to an
+  eligible replica and fail over around ones that are down or missing a range. Replicas can be in-process
+  (reference) or **remote over TCP**. The successor to RAID1 — cross-host redundancy with quorum instead of two
+  local devices — with a RAID1-cost **"skinny" mode** (two data replicas + a quorum arbiter) on the way.
+- **RAID Support**: RAID0 (striping), RAID1 (mirroring), and RAID10 (stripe of mirrors)
 - **RAID1 Resilient Bitmap**: Memory-efficient dirty tracking (4 KiB page tracks 1 GiB data)
 - **Thin-Aware, Resumable Resync**: Per-scenario copy modes (blind / compare-skip / zero-detect) persisted in the superblock; a cleanly-stopped resync resumes where it left off
 - **Hot Device Replacement**: Swap devices in degraded RAID1 arrays without downtime
 - **Lock-Free I/O Path**: Read/write operations use lock-free algorithms (x86-64/ARM64)
-- **Factory-Based API**: File-backed disks and RAID compositions through supported factory functions
+- **Factory-Based API**: Replicated volumes, file-backed disks, and RAID compositions through supported factory functions
 - **Coroutine I/O**: Single-event-loop, CQE-driven coroutine pipeline
 - **Comprehensive Testing**: High test coverage with unit and functional (fio-driven) tests
 - **Modern C++**: Built with C++23, leveraging `std::expected` for error handling
-- **Production Ready**: Thread-safe, handles degraded modes
 
 ## 📋 Table of Contents
 
 - [Quick Start](#-quick-start)
 - [Architecture](#-architecture)
+- [CraftDisk (Replicated Volume)](#-craftdisk-replicated-volume)
 - [RAID Features](#-raid-features)
 - [Example Application](#-example-application)
 - [Development](#-development)
@@ -69,12 +75,13 @@ conan build -s:h build_type=Debug -o ublkpp/*:sanitize=thread --build missing .
 ```
 ublkpp/
 ├── include/ublkpp/       # Public headers
+│   ├── craft_disk.hpp    # CraftDisk (replicated volume) factories
 │   ├── drivers.hpp       # File-backed disk factory
 │   ├── raid.hpp          # RAID factories and helpers
 │   ├── target.hpp        # ublk target interface
 │   └── lib/              # Base disk subclassing API
 ├── src/
-│   ├── driver/           # File-backed backend implementation
+│   ├── driver/           # File-backed + CraftDisk backend implementations
 │   ├── lib/              # Core ublk_disk base classes
 │   ├── metrics/          # I/O and RAID metrics
 │   ├── raid/             # RAID logic (bitmap, superblock)
@@ -86,10 +93,37 @@ ublkpp/
 
 - **`ublk_disk`**: Base class for all block devices
 - **`disk_handle`**: Shared ownership handle for disks and RAID composites
+- **`make_craft_disk_local()` / `make_craft_disk_tcp()`**: CraftDisk (replicated volume) factories — in-process reference or remote-over-TCP replicas
 - **`make_fs_disk()`**: File/block-backed disk construction
 - **`make_raid0_disk()` / `make_raid1_disk()`**: RAID composition factories
 - **`raid0::*` / `raid1::*`**: Free-function helpers for topology and mirror management
 - **`ublkpp_tgt`**: Exposes devices to kernel via ublk
+
+## 💠 CraftDisk (Replicated Volume)
+
+`CraftDisk` exposes a **CRAFT replica set** as a single `/dev/ublkbN`. Where RAID1 mirrors to two *local* block
+devices, CraftDisk **replicates across N replicas that may be remote** — so redundancy spans hosts, not just
+devices. It is the intended **successor to RAID1**.
+
+**Model:**
+- **Quorum writes.** A write broadcasts to every replica at a client-assigned data-LSN and returns as soon as a
+  majority acks — never waiting for the slowest replica; a straggler keeps running and still lands the write.
+  No write flows through a consensus log.
+- **Routed reads.** Reads are unicast to one eligible replica at a read horizon and fail over on a miss/down —
+  the N-way, cross-host analogue of RAID1's degraded-mode read routing.
+- **Pluggable transport.** Replicas are an in-process reference cluster (`make_craft_disk_local`, no servers, no
+  wire) or remote servers over io_uring TCP (`make_craft_disk_tcp`). The driver is identical either way.
+- **Self-configuring.** The device sizes itself (capacity + block size) from what the replica set reports at
+  login — no out-of-band geometry.
+
+**Skinny mode — in progress.** For a RAID1-cost deployment, CraftDisk runs **two data-replicating backends plus
+a lightweight arbiter**: the two backends hold the data (a 2-copy footprint, same as a RAID1 mirror), while the
+arbiter stores no data but votes in the configuration / LSN quorum. That preserves a true majority (2 of 3
+members) — so failover and fencing stay split-brain-safe — without paying for a third full data copy. This is
+what makes CraftDisk a drop-in RAID1 replacement: the same storage cost, with real quorum behind it.
+
+> Backed by the standalone [`craft_client`](https://github.com/szmyd/craft_client) package (the CRAFT wire
+> protocol, client, and reference model). See `include/ublkpp/craft_disk.hpp`.
 
 ## 💾 RAID Features
 
@@ -100,6 +134,9 @@ ublkpp/
 - Linear capacity aggregation
 
 ### RAID1 (Mirroring)
+
+> **Being superseded by [CraftDisk](#-craftdisk-replicated-volume)** — a quorum-replicated, cross-host volume;
+> its "skinny mode" (two data replicas + an arbiter) matches RAID1's storage cost with real quorum behind it.
 
 **Key Features:**
 - Two-way mirroring with dirty bitmap tracking
@@ -162,6 +199,10 @@ sudo ublkpp/build/Release/example/ublkpp_disk --raid10 file1.dat,file2.dat,file3
 ### Usage Examples
 
 ```bash
+# CraftDisk: a self-contained 1 GiB replicated volume over an in-process reference cluster (no servers, no wire)
+sudo ublkpp_disk --craft 1024
+# (raw block I/O works today; DISCARD/WRITE_ZEROES return ENOTSUP, so hold off on mkfs until that lands)
+
 # Single device (loop mode)
 sudo ublkpp_disk --loop /dev/sdb
 
@@ -299,6 +340,7 @@ TEST(Raid1, YourTestName) {
 
 ### Core Dependencies
 
+- **[craft_client](https://github.com/szmyd/craft_client)**: CRAFT wire protocol, client, and reference model — the CraftDisk backend
 - **[sisl](https://github.com/eBay/sisl)** v14+: Logging, options, metrics, HTTP server
 - **[ublksrv](https://github.com/ublk-org/ublksrv)**: ublk driver interface
 - **isa-l**: RAID acceleration primitives

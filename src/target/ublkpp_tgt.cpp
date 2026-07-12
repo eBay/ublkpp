@@ -117,8 +117,14 @@ static exec::task< void > run_queue_loop(ublksrv_queue const* q, ublkpp_queue_st
         int probe_count{0}; // probe timeout CQEs must not count as work for ublksrv_queue_update_idle
         io_uring_for_each_cqe(ring, head, cqe) {
             if (sisl::async::is_managed_user_data(cqe->user_data)) {
-                auto* state = static_cast< cqe_state* >(sisl::async::decode_managed_user_data(cqe->user_data));
-                if (!state) {
+                // Decode to the COMMON base. A managed CQE is one of two shapes sharing this base at offset 0:
+                // ours (ublkpp::cqe_state, _on_complete null, resumed via _waiter/_owner below) or a generic
+                // sisl::async::cqe_state a transport that shares our ring submitted (craft_client's on-ring
+                // cqe_awaitable, _on_complete set). We MUST branch on _on_complete before touching _waiter/_owner:
+                // those live at OUR layout's offsets, which a foreign cqe_state does not share.
+                auto* base =
+                    static_cast< sisl::async::cqe_state* >(sisl::async::decode_managed_user_data(cqe->user_data));
+                if (!base) {
                     // probe timeout CQE — only ETIME triggers a probe tick; other results ignored.
                     // Excluded from io_count: counting it as work triggers idle_exit, setting
                     // is_idle=false and preventing the probe from re-arming on subsequent fires.
@@ -135,8 +141,15 @@ static exec::task< void > run_queue_loop(ublksrv_queue const* q, ublkpp_queue_st
                         if (qs->is_idle && !qs->tgt->_shutting_down.load(std::memory_order_relaxed))
                             submit_probe_timeout(q);
                     }
+                } else if (base->_on_complete) {
+                    // Generic sisl::async::cqe_state (e.g. craft_client's on-ring transport, submitting delivery
+                    // SQEs on this queue's ring): dispatch through its own thunk, which resumes its own waiter.
+                    // This is the whole of "cross-boundary completion is free" -- zero knowledge of the transport.
+                    sisl::async::complete_cqe_state(*base, cqe->res);
                 } else {
-                    // target io_uring CQE — resume the coroutine waiting on this cqe_state
+                    // Ours: a ublkpp::cqe_state. Resume the coroutine waiting on it; a throw out of resume() is
+                    // reported as -EIO on the owning tag (why we resume _waiter directly, not via a noexcept thunk).
+                    auto* state = static_cast< cqe_state* >(base);
                     state->_result = cqe->res;
                     state->_result_ready = true;
                     try {

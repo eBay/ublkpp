@@ -111,25 +111,32 @@ static FireAndForget await_cqe_and_capture(ublkpp::cqe_state* state, int* out) {
 
 TEST(cqe_state, AwaitReadyFalseWhenNotReady) {
     ublkpp::async_io io{};
-    ublkpp::cqe_state state{._owner = &io, ._result_ready = false};
+    ublkpp::cqe_state state{};
+    state._owner = &io;
     EXPECT_FALSE(state.await_ready());
 }
 
 TEST(cqe_state, AwaitReadyTrueWhenReady) {
     ublkpp::async_io io{};
-    ublkpp::cqe_state state{._owner = &io, ._result_ready = true};
+    ublkpp::cqe_state state{};
+    state._owner = &io;
+    state._result_ready = true;
     EXPECT_TRUE(state.await_ready());
 }
 
 TEST(cqe_state, AwaitResumeReturnsResult) {
     ublkpp::async_io io{};
-    ublkpp::cqe_state state{._owner = &io, ._result = 42, ._result_ready = true};
+    ublkpp::cqe_state state{};
+    state._owner = &io;
+    state._result = 42;
+    state._result_ready = true;
     EXPECT_EQ(state.await_resume(), 42);
 }
 
 TEST(cqe_state, AwaitSuspendInstallsWaiterInState) {
     ublkpp::async_io io{};
-    ublkpp::cqe_state state{._owner = &io, ._result_ready = false};
+    ublkpp::cqe_state state{};
+    state._owner = &io;
     EXPECT_FALSE(state._waiter);
     int captured = -1;
     await_cqe_and_capture(&state, &captured); // suspends; installs handle in state._waiter
@@ -144,7 +151,10 @@ TEST(cqe_state, AwaitSuspendInstallsWaiterInState) {
 
 TEST(cqe_state, FastPathSkipsSuspendWhenAlreadyReady) {
     ublkpp::async_io io{};
-    ublkpp::cqe_state state{._owner = &io, ._result = 55, ._result_ready = true};
+    ublkpp::cqe_state state{};
+    state._owner = &io;
+    state._result = 55;
+    state._result_ready = true;
     int captured = -1;
     await_cqe_and_capture(&state, &captured); // await_ready=true -> no suspension
     EXPECT_FALSE(state._waiter);
