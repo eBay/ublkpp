@@ -12,6 +12,7 @@
 #include <sisl/logging/logging.h>
 #include <sisl/options/options.h>
 
+#include <ublkpp/craft_disk.hpp>
 #include <ublkpp/drivers.hpp>
 #include <ublkpp/raid.hpp>
 #include <ublkpp/target.hpp>
@@ -27,6 +28,12 @@ SISL_OPTION_GROUP(ublkpp_disk,
                    "<path>[,<path>,...]"),
                   (stripe_size, "", "stripe_size", "RAID-0 Stripe Size",
                    ::cxxopts::value< uint32_t >()->default_value("131072"), ""),
+                  (craft, "", "craft", "CRAFT in-process reference volume of the given size (MiB)",
+                   ::cxxopts::value< uint64_t >(), "<size_mb>"),
+                  (craft_tcp, "", "craft_tcp",
+                   "CRAFT over TCP: comma-separated host:port replica endpoints (run a "
+                   "craft_reference_tcp_srv per endpoint first)",
+                   ::cxxopts::value< std::string >(), "<host:port,...>"),
                   (device_id, "", "device_id", "Recover existing device",
                    cxxopts::value< int32_t >()->default_value("-1"), "<ublkid>"),
                   (assume_clean, "", "assume_clean",
@@ -145,6 +152,46 @@ Result create_raid10(boost::uuids::uuid const& id, std::vector< std::string > co
     return _run_target(id, std::move(dev));
 }
 
+// A self-contained CRAFT device: an in-process 3-replica reference cluster (no servers, no wire) behind a ublk
+// block device. The disk logs in and self-sizes from what the cluster reports; `size_mb` sets the volume size.
+Result create_craft(boost::uuids::uuid const& id, uint64_t size_mb) {
+    auto dev = std::shared_ptr< ublkpp::ublk_disk >();
+    try {
+        dev = ublkpp::make_craft_disk_local(id, /*n=*/3, /*page_size=*/4096, /*capacity=*/size_mb << 20);
+    } catch (std::runtime_error const& e) { LOGERROR("craft disk create failed: {}", e.what()) }
+    if (!dev) return std::unexpected(std::make_error_condition(std::errc::operation_not_permitted));
+    return _run_target(id, std::move(dev));
+}
+
+// CRAFT over TCP: connect to standalone craft_reference_tcp_srv replicas at the given host:port endpoints. The
+// disk logs in to the first (leader), self-sizes from its login geometry (capacity / block size / max transfer),
+// and drives writes/reads over the ON-RING transport at QD>1. Start one craft_reference_tcp_srv per endpoint.
+Result create_craft_tcp(boost::uuids::uuid const& id, std::string const& endpoints) {
+    std::vector< craft::replica_endpoint > members;
+    for (std::size_t start = 0; start <= endpoints.size();) {
+        auto const comma = endpoints.find(',', start);
+        auto const addr = endpoints.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+        if (!addr.empty()) {
+            craft::replica_endpoint m;
+            m.id = boost::uuids::random_generator()(); // cosmetic: the server routes by index / fences by term, not id
+            m.addr = addr;                             // "host:port"; tcp_cluster splits on the last ':'
+            members.push_back(std::move(m));
+        }
+        if (comma == std::string::npos) break;
+        start = comma + 1;
+    }
+    if (members.empty()) {
+        LOGERROR("craft_tcp: no endpoints given")
+        return std::unexpected(std::make_error_condition(std::errc::invalid_argument));
+    }
+    auto dev = std::shared_ptr< ublkpp::ublk_disk >();
+    try {
+        dev = ublkpp::make_craft_disk_tcp(std::move(members), id);
+    } catch (std::runtime_error const& e) { LOGERROR("craft_tcp disk create failed: {}", e.what()) }
+    if (!dev) return std::unexpected(std::make_error_condition(std::errc::operation_not_permitted));
+    return _run_target(id, std::move(dev));
+}
+
 int main(int argc, char* argv[]) {
     SISL_OPTIONS_LOAD(argc, argv, ENABLED_OPTIONS);
     sisl::logging::SetLogger(std::string(argv[0]),
@@ -168,6 +215,10 @@ int main(int argc, char* argv[]) {
         res = create_raid1(vol_id, SISL_OPTIONS["raid1"].as< std::vector< std::string > >());
     } else if (0 < SISL_OPTIONS["raid10"].count()) {
         res = create_raid10(vol_id, SISL_OPTIONS["raid10"].as< std::vector< std::string > >());
+    } else if (0 < SISL_OPTIONS["craft"].count()) {
+        res = create_craft(vol_id, SISL_OPTIONS["craft"].as< uint64_t >());
+    } else if (0 < SISL_OPTIONS["craft_tcp"].count()) {
+        res = create_craft_tcp(vol_id, SISL_OPTIONS["craft_tcp"].as< std::string >());
     } else
         std::cout << SISL_PARSER.help({}) << std::endl;
 

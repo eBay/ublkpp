@@ -10,7 +10,7 @@ required_conan_version = ">=2.0"
 
 class UBlkPPConan(ConanFile):
     name = "ublkpp"
-    version = "0.36.2"
+    version = "0.40.0"
 
     homepage = "https://github.com/ebay/ublkpp"
     description = "C++23 library providing RAID support for Linux userspace block (ublk) driver"
@@ -72,7 +72,8 @@ class UBlkPPConan(ConanFile):
         self.requires("sisl/[^14.4]@oss/dev", transitive_headers=True)
 
         self.requires("isa-l/2.30.0")
-        self.requires("ublksrv/nbi.1.5.0.2", transitive_headers=True)
+        self.requires("ublksrv/nbi.1.5.0.1", transitive_headers=True)
+        self.requires("craft_client/[^0.2]@oss/dev", transitive_headers=True)
 
     def layout(self):
         self.folders.source = "."
@@ -138,7 +139,9 @@ class UBlkPPConan(ConanFile):
         copy(self, "*.so", self.build_folder, join(self.package_folder, "lib"), keep_path=False)
 
     def package_info(self):
-        self.cpp_info.requires = ["sisl::cache", "isa-l::isa-l", "ublksrv::ublksrv"]
+        # craft_reference pulls the whole chain (craft_client -> craft_types -> craft_wire); the craft_disk's
+        # in-process (make_local_cluster) factory needs the reference model.
+        self.cpp_info.requires = ["sisl::cache", "isa-l::isa-l", "ublksrv::ublksrv", "craft_client::craft_reference"]
         if self.settings.os == "Linux":
             self.cpp_info.system_libs = ["atomic"]
         if self.options.get_safe("sanitize") and self.options.sanitize != "False":

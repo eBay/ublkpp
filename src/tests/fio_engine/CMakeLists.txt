@@ -43,6 +43,7 @@ target_link_libraries(ublkpp_fio_engine PRIVATE
     ublkpp
     ublksrv::ublksrv
     sisl::cache
+    craft_client::craft_reference # make_craft_disk_local -> make_local_cluster (in-process CRAFT reference)
     $<$<PLATFORM_ID:Linux>:atomic>
 )
 target_include_directories(ublkpp_fio_engine PRIVATE
@@ -201,6 +202,19 @@ add_test(NAME FunctionalRAID10CrossStripe
 set_tests_properties(FunctionalRAID10CrossStripe PROPERTIES
     ENVIRONMENT "${RAID10XS_ENV}"
     FIXTURES_REQUIRED FunctionalImages
+    TIMEOUT 180
+    LABELS "Functional"
+)
+
+# --- CRAFT (in-process reference cluster: no backing files, no fixture) — the on-ring transport at depth ---
+add_test(NAME FunctionalCraft
+    COMMAND ${FIO_EXECUTABLE} ${FIO_BASE_ARGS}
+        ${CMAKE_CURRENT_SOURCE_DIR}/jobs/craft_verify.fio
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+set(CRAFT_ENV "ENGINE_SO=${ENGINE_SO}" ${FUNCTIONAL_ENV})
+set_tests_properties(FunctionalCraft PROPERTIES
+    ENVIRONMENT "${CRAFT_ENV}"
     TIMEOUT 180
     LABELS "Functional"
 )
