@@ -1,7 +1,6 @@
 #include "ublkpp/craft_disk.hpp"
 
 #include <algorithm>
-#include <atomic>
 #include <bit>
 #include <cerrno>
 #include <cstddef>
@@ -9,7 +8,8 @@
 
 #include <boost/uuid/uuid_io.hpp>
 #include <sisl/logging/logging.h>
-#include <ublksrv.h> // ublksrv_queue, ublk_io_data, ublksrv_get_op
+#include <sisl/options/options.h> // nr_hw_queues / qdepth (ublkpp_tgt's group) -- the client's aggregate IO bound
+#include <ublksrv.h>              // ublksrv_queue, ublk_io_data, ublksrv_get_op
 
 #include <ublkpp/lib/ublk_disk.hpp>
 
@@ -24,23 +24,27 @@
 
 namespace ublkpp {
 
-// ── on-ring CRAFT completion ──
+// ── on-ring CRAFT completion: THE RING TRAVELS WITH THE VERB ──
 //
 // async_iov awaits the CRAFT verb DIRECTLY -- craft::read/write return freestanding tasks
-// (sisl::async::light_task), co_await-able from this disk_task frame. The op starts INLINE on the ublk queue
-// thread: dLSN reservation, quorum broadcast, and transport serialize all run there before the first
-// suspension. Every reply arrives as a CQE on the QUEUE'S OWN ring (prepare binds the client via
-// craft::prepare_for_async below) -- the mem transport times out on it, the TCP transport recvs on it -- so
-// run_queue_loop reaps them and dispatches the foreign (_on_complete) cqe_states, resuming craft's transport
-// coroutines ON THE QUEUE THREAD. When the verb finishes it resumes this frame inline (a light_task resumes
-// its awaiter on the completing thread -- the contract documented on the verbs in craft/client.hpp), and
-// disk_task's continuation carries the result up to ublksrv_complete_io. No shim coroutine, no detach, no
-// rendezvous state: the continuation chain IS the completion path, and no CQE ever needs attributing to a tag.
+// (sisl::async::light_task), co_await-able from this disk_task frame -- and hands the verb THIS QUEUE'S ring
+// (craft_client >= 0.3.0: `q` sits right after the handle, the ublk parameter order). The op starts INLINE on
+// the ublk queue thread: dLSN reservation, quorum broadcast, and transport serialize all run there before the
+// first suspension. Every reply then arrives as a CQE on the ring we passed -- the mem transport times out on
+// it, the TCP transport recvs on it -- so run_queue_loop reaps them and dispatches the foreign (_on_complete)
+// cqe_states, resuming craft's transport coroutines ON THIS QUEUE'S THREAD. When the verb finishes it resumes
+// this frame inline (a light_task resumes its awaiter on the completing thread -- the contract documented on
+// the verbs in craft/client.hpp), and disk_task's continuation carries the result up to ublksrv_complete_io.
+// No shim coroutine, no detach, no rendezvous state: the continuation chain IS the completion path, and no CQE
+// ever needs attributing to a tag.
 //
-// prepare_for_async is therefore PART OF THE DATA-PATH CONTRACT, not a tuning knob: unbound, craft's verbs
-// resume their awaiter on a transport-internal thread (reference-model pool / session-mgr), which would run
-// this frame -- and ublksrv_complete_io -- off the queue thread. prepare() always binds the ring; single queue
-// only (exactly one client ring is bound, so a second queue is rejected until per-queue rings land).
+// The ring is therefore PART OF EVERY CALL, not session state: there is nothing to bind, and no client-wide
+// ring for a second queue to collide with. AFFINITY IS OUR CONTRACT, exactly as it is with a raw io_uring: a
+// ring is passed only from the thread that owns and reaps it, which is what a ublk queue thread already is. So
+// nr_hw_queues > 1 just works -- each queue drives CRAFT on its own ring (the client opens one connection per
+// (ring, replica), the nr_hw_queues x N grid, lazily at that ring's first verb), and one op's whole leg chain
+// (broadcast legs, read failovers, the keep_alives it spawns) rides the ring it was called with. Client-wide
+// state (the dLSN tracker, the route map) is shared across queues by design; only the transport is per ring.
 //
 // Exception edge (unchanged in kind from the shim design): the resume chain runs under the transport thunk's
 // noexcept boundary, so nothing between here and ublksrv_complete_io may throw -- craft errors travel as
@@ -101,40 +105,25 @@ public:
 
     std::string id() const noexcept override { return _id_str; }
 
-    prepare_result prepare(ublksrv_queue const* q, int const) override {
-        // Size the queue ring for the ON-RING data path. The peak delivery-SQE count of one in-flight IO is NOT
-        // the replica count: a WRITE is one dLSN broadcast to N replicas (N legs), but the client splits a READ
-        // into one sub-read PER horizon segment -- up to max_tx/page_size of them -- and issue_plan sends every
-        // sub-read to the SAME replica (unicast), so a fully-split read puts max_tx/page_size legs on the ring at
-        // once. That read ceiling dominates N, so we size to it (an extra *N would exceed IORING_MAX_ENTRIES at a
-        // deep qd, since tgt_ring_depth = qd*(max_sqes_per_io+1)+1). SQ-full still degrades gracefully (ring_delay
-        // falls back to inline completion), so this is a "keep it on the ring" ceiling, not a correctness bound.
-        // (init_queue also reserves the per-IO cqe_state pool to this.)
+    prepare_result prepare(ublksrv_queue const*, int const) override {
+        // Nothing to bind: the ring travels with each verb (see the note above), so every queue is served by the
+        // same client with no per-queue setup. All prepare does is SIZE the queue's ring for the on-ring data
+        // path. The peak delivery-SQE count of one in-flight IO is NOT the replica count: a WRITE is one dLSN
+        // broadcast to N replicas (N legs), but the client splits a READ into one sub-read PER horizon segment --
+        // up to max_tx/page_size of them -- and issue_plan sends every sub-read to the SAME replica (unicast), so
+        // a fully-split read puts max_tx/page_size legs on the ring at once. That read ceiling dominates N, so we
+        // size to it (an extra *N would exceed IORING_MAX_ENTRIES at a deep qd, since
+        // tgt_ring_depth = qd*(max_sqes_per_io+1)+1). SQ-full still degrades gracefully (ring_delay falls back to
+        // inline completion), so this is a "keep it on the ring" ceiling, not a correctness bound. (init_queue
+        // also reserves the per-IO cqe_state pool to this.) Called once per queue, plus once as prepare(nullptr,
+        // 0) from init_tgt on the setup thread -- the answer is the same either way.
         auto const& bp = params()->basic;
         uint32_t const page = uint32_t{1} << bp.logical_bs_shift; // == lba_size(_client)
         uint64_t const max_io_bytes = static_cast< uint64_t >(bp.max_sectors) << k_sector_shift;
-        prepare_result const k_result{.fds = {}, .max_sqes_per_io = std::max< size_t >(1, max_io_bytes / page)};
-
-        // init_tgt calls prepare(nullptr, 0) on the setup thread, purely to size the ring.
-        if (!q) return k_result;
-
-        // Multi-queue is not wired yet: exactly ONE client ring is bound (below), so a second queue would submit
-        // its legs on the first queue's ring and complete on the wrong thread -- and the verb's inline resume of
-        // the awaiting async_iov frame would then corrupt this queue. Blow up rather than corrupt: RELEASE_ASSERT,
-        // not throw --
-        // prepare runs inside ublksrv's C init_queue callback where unwinding is UB, and there is nothing to
-        // recover to until per-queue rings land. Run with --nr_hw_queues 1. Queue inits run concurrently, one per
-        // queue thread, so count atomically.
-        auto const nprepared = _prepared.fetch_add(1, std::memory_order_relaxed);
-        RELEASE_ASSERT_EQ(nprepared, 0u, "craft_disk: multi-queue not yet supported; run with --nr_hw_queues 1")
-
-        // Bind the client's replica legs to THIS queue's ring so their delivery SQEs are reaped by run_queue_loop
-        // (many in flight at once, QD>1, on the queue thread) instead of a transport pool.
-        craft::prepare_for_async(_client, q->ring_ptr);
-        return k_result;
+        return prepare_result{.fds = {}, .max_sqes_per_io = std::max< size_t >(1, max_io_bytes / page)};
     }
 
-    disk_task< int > async_iov(ublksrv_queue const*, ublk_io_data const* data, iovec* iovecs, uint32_t nr_vecs,
+    disk_task< int > async_iov(ublksrv_queue const* q, ublk_io_data const* data, iovec* iovecs, uint32_t nr_vecs,
                                uint64_t addr) override {
         auto const op = ublksrv_get_op(data->iod);
         if (op == UBLK_IO_OP_FLUSH) co_return 0; // CRAFT IO is durable once acked (quorum-appended)
@@ -152,15 +141,18 @@ public:
         }
         uint64_t const len = sgs.size;
 
-        // Read the tag before the first co_await (only for tracing): `data` belongs to the queue and must not be
-        // touched once the client has us suspended.
+        // Read everything we need off the queue BEFORE the first co_await: `data` belongs to the queue and must
+        // not be touched once the client has us suspended. That is the tag (tracing only) and THIS QUEUE'S ring,
+        // which we hand to the verb -- we are on the queue thread here, the one that owns and reaps it, which is
+        // exactly the affinity craft asks of the caller.
         int const tag = data->tag;
+        auto* const ring = q->ring_ptr;
 
         DLOGT("craft io start [tag:{:#x}] {} addr={} len={}", tag, is_read ? "RD" : "WR", addr, len)
         // Await the verb directly (see the on-ring completion note above): runs inline to its first suspension,
-        // resumes here on the queue thread when the reply CQEs finish it.
-        auto const res = is_read ? co_await craft::read(_client, addr, len, std::move(sgs))
-                                 : co_await craft::write(_client, addr, len, std::move(sgs));
+        // puts its legs on `ring`, and resumes here on this queue's thread when the reply CQEs finish it.
+        auto const res = is_read ? co_await craft::read(_client, ring, addr, len, std::move(sgs))
+                                 : co_await craft::write(_client, ring, addr, len, std::move(sgs));
 
         if (res.has_value()) {
             DLOGT("craft io done  [tag:{:#x}] {} result={}", tag, is_read ? "RD" : "WR", res.value())
@@ -175,11 +167,15 @@ public:
         co_return -EIO; // term fenced / no quorum / replica down / timed out -- the error message says which
     }
 
-    void probe_tick(ublksrv_queue const*) noexcept override {
+    void probe_tick(ublksrv_queue const* q) noexcept override {
         // Idle queue: no read/write to piggyback the commit watermark on. Drive a keep_alive at every leg (one
-        // outstanding each) so the session does not expire -- the client's timer-less liveness mechanism.
-        // drive_keepalives fires each keep_alive detached, so this never blocks the queue thread.
-        craft::drive_keepalives(_client);
+        // outstanding each) so the session does not expire -- the client's timer-less liveness mechanism. Fire it
+        // on THIS queue's ring: the legs are detached, so this never blocks the queue thread, and they complete
+        // as foreign CQEs that our own run_queue_loop reaps. The one-outstanding-per-leg collapse is client-wide,
+        // not per queue, so with several idle queues whichever gets there first fires the leg on its own ring and
+        // the rest find it already outstanding. A null ring is craft's blocking tier (the ringless overload
+        // passes exactly that), so a caller without a queue still drives liveness, just off-ring.
+        craft::drive_keepalives(_client, q ? q->ring_ptr : nullptr);
     }
 
 private:
@@ -188,8 +184,22 @@ private:
     std::shared_ptr< void > _transport; // opaque cluster keep-alive; must outlive _client
     craft::client_handle _client;
     std::string _id_str;
-    std::atomic< uint32_t > _prepared{0}; // count of real prepare() calls; > 1 means multi-queue (unsupported)
 };
+
+// craft::make_client's `max_inflight` is the AGGREGATE in-flight bound across every queue, so a blk-mq driver
+// owes it nr_hw_queues x qdepth. It is not just a statistic: it sizes the dLSN tracker's winner-scan tripwire,
+// and a read whose unresolved-dLSN window exceeds that cap is FENCED rather than served -- undersize it and
+// deep-queue reads can fail spuriously. Both options belong to ublkpp_tgt's group, which a unit test or the fio
+// engine does not enable (there are no ublk queues there either); fall back to craft's own default in that case.
+constexpr uint32_t k_default_max_inflight = 128; // == craft::make_client's default
+
+uint32_t aggregate_inflight() {
+    if (!SISL_OPTIONS.count("nr_hw_queues") || !SISL_OPTIONS.count("qdepth")) return k_default_max_inflight;
+    auto const queues = uint32_t{SISL_OPTIONS["nr_hw_queues"].as< uint16_t >()};
+    auto const qdepth = uint32_t{SISL_OPTIONS["qdepth"].as< uint16_t >()};
+    if (queues == 0 || qdepth == 0) return k_default_max_inflight;
+    return queues * qdepth;
+}
 
 // Log the client in on the setup thread (off any reactor), or throw. Returns the logged-in handle.
 craft::client_handle login_or_throw(craft::client_handle client, uint64_t token, char const* what) {
@@ -207,7 +217,8 @@ disk_handle make_craft_disk_local(craft::volume_id_t vol_id, uint32_t n, uint32_
     // `max_tx` configures the in-process volume here; the disk reads it back via craft::max_tx(client) after
     // login, so the device geometry is single-sourced from the client, never re-picked.
     auto cluster = craft::make_local_cluster(vol_id, n, page_size, capacity, max_tx);
-    auto client = login_or_throw(craft::make_client(craft::backends(cluster)), client_token, "make_craft_disk_local");
+    auto client = login_or_throw(craft::make_client(craft::backends(cluster), /*leader=*/0, aggregate_inflight()),
+                                 client_token, "make_craft_disk_local");
     return std::make_shared< CraftDisk >(std::static_pointer_cast< void >(cluster), std::move(client), vol_id);
 }
 
@@ -215,7 +226,8 @@ disk_handle make_craft_disk_tcp(std::vector< craft::replica_endpoint > members, 
                                 uint64_t client_token) {
     // No max_tx here: the SERVER's volume defines it, and the disk reads it via craft::max_tx(client) after login.
     auto cluster = craft::make_tcp_cluster(members, vol_id);
-    auto client = login_or_throw(craft::make_client(craft::backends(cluster)), client_token, "make_craft_disk_tcp");
+    auto client = login_or_throw(craft::make_client(craft::backends(cluster), /*leader=*/0, aggregate_inflight()),
+                                 client_token, "make_craft_disk_tcp");
     return std::make_shared< CraftDisk >(std::static_pointer_cast< void >(cluster), std::move(client), vol_id);
 }
 

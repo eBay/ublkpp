@@ -42,11 +42,11 @@ TEST(CraftDisk, RejectsBadPageSize) {
 }
 
 // Drive the on-ring CRAFT transport through the REAL ublk_disk path AT DEPTH. MockUblksrv owns an io_uring and
-// calls CraftDisk::prepare, which binds the client's replica legs to that ring (prepare_for_async); then it
-// starts async_iov for N tags before polling, so every leg's delivery SQE sits on the ring at once and is reaped
-// by the mock's run_queue_loop-shaped poll (the _on_complete dispatch that tells craft's cqe_awaitable from
-// ublkpp's own cqe_state). That depth -- many scattered IOs in flight together -- is exactly what QD=1 cannot
-// produce and what CRAFT's correctness is emergent from. Round-trip every block to prove data integrity too.
+// exposes it as the queue's ring_ptr, which async_iov hands to each CRAFT verb; it starts async_iov for N tags
+// before polling, so every leg's delivery SQE sits on that ring at once and is reaped by the mock's
+// run_queue_loop-shaped poll (the _on_complete dispatch that tells craft's cqe_awaitable from ublkpp's own
+// cqe_state). That depth -- many scattered IOs in flight together -- is exactly what QD=1 cannot produce and
+// what CRAFT's correctness is emergent from. Round-trip every block to prove data integrity too.
 TEST(CraftDisk, OnRingDepthWriteReadRoundTrip) {
     auto const vol = boost::uuids::random_generator()();
     constexpr uint32_t k_page = 4096;
@@ -57,8 +57,8 @@ TEST(CraftDisk, OnRingDepthWriteReadRoundTrip) {
     auto disk = ublkpp::make_craft_disk_local(vol, /*n=*/3, k_page, k_capacity);
     ASSERT_TRUE(disk);
 
-    // q_depth = N: prepare() binds the client to this queue's ring; submit_io starts async_iov (inline, to its
-    // first suspend) without driving the ring, so all N tags are pending before the first poll.
+    // q_depth = N: submit_io starts async_iov (inline, to its first suspend) without driving the ring, so all N
+    // tags are pending before the first poll.
     ublkpp::MockUblksrv mock(disk, /*q_depth=*/N, /*nr_queues=*/1);
 
     // ── writes: distinct pattern per block, all N submitted BEFORE polling (3*N replica legs on the ring) ──
