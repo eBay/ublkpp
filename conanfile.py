@@ -73,7 +73,7 @@ class UBlkPPConan(ConanFile):
 
         self.requires("isa-l/2.30.0")
         self.requires("ublksrv/nbi.1.5.0.1", transitive_headers=True)
-        self.requires("craft_client/[^0.2]@oss/dev", transitive_headers=True)
+        self.requires("craft_client/[^0.3]@oss/dev", transitive_headers=True)
 
     def layout(self):
         self.folders.source = "."

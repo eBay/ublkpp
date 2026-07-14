@@ -115,6 +115,10 @@ devices. It is the intended **successor to RAID1**.
   wire) or remote servers over io_uring TCP (`make_craft_disk_tcp`). The driver is identical either way.
 - **Self-configuring.** The device sizes itself (capacity + block size) from what the replica set reports at
   login — no out-of-band geometry.
+- **Multi-queue (blk-mq).** Runs at any `--nr_hw_queues`: each ublk queue thread drives CRAFT on **its own**
+  io_uring, so a reply is reaped by the thread that issued it and completions never cross threads. The client
+  opens one connection per (queue ring, replica) — an `nr_hw_queues × N` grid — while the replica set itself
+  stays shared.
 
 **Skinny mode — in progress.** For a RAID1-cost deployment, CraftDisk runs **two data-replicating backends plus
 a lightweight arbiter**: the two backends hold the data (a 2-copy footprint, same as a RAID1 mirror), while the

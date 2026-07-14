@@ -8,13 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **CraftDisk awaits CRAFT verbs directly** (requires `craft_client >= 0.2.0`, whose verbs now return the
+- **CraftDisk awaits CRAFT verbs directly** (requires `craft_client >= 0.3.0`, whose verbs return the
   freestanding `sisl::async::light_task`): `async_iov` co_awaits `craft::read`/`craft::write` in its own frame,
   and the disk_task continuation carries the result to `ublksrv_complete_io`. The `run_craft_io` exec::task
   shim, its `sisl::async::detach` launch, and the per-IO `cqe_state` rendezvous are deleted — the framework
-  boundary they bridged no longer exists. `prepare_for_async` is now documented (upstream) as part of the
-  data-path contract: unbound, verbs resume their awaiter on a transport-internal thread; `CraftDisk::prepare`
-  always binds the queue's ring, unchanged.
+  boundary they bridged no longer exists.
+- **CraftDisk supports `nr_hw_queues > 1`**: craft_client 0.3.0 retires `prepare_for_async` — the ring now
+  travels WITH the verb (`craft::read`/`write`/`drive_keepalives` take the caller's `io_uring` right after the
+  handle), so there is no client-wide bound ring for a second queue to collide with. `async_iov` and
+  `probe_tick` pass their own queue's `ring_ptr`; each queue thread reaps only the legs it issued (the client
+  opens one connection per (ring, replica) — the `nr_hw_queues x N` grid), so the `RELEASE_ASSERT` that
+  rejected a second queue is gone and `CraftDisk::prepare` is now pure ring sizing. Affinity is the driver's
+  contract, which a ublk queue thread satisfies by construction: a ring is only ever passed from the thread
+  that owns and reaps it.
+- **CraftDisk sizes the client's `max_inflight` to `nr_hw_queues x qdepth`** (the aggregate bound across all
+  queues, per craft_client 0.3.0). It sizes the dLSN tracker's winner-scan tripwire, past which a read is
+  fenced rather than served — at the previous fixed default a deep multi-queue device could fence reads
+  spuriously. Falls back to craft's default when `ublkpp_tgt`'s option group is absent (unit tests, fio engine).
 - **MockUblksrv is continuation-based**: each submit wraps `async_iov` in a recorder coroutine whose tail
   records `{tag, result}` (mirroring `__handle_io_async`), delivered exactly once by `poll()`/`inject_cqe()`.
   The post-batch sweep and per-CQE tag attribution are gone, fixing a latent cross-poll double-report and
