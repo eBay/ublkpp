@@ -12,10 +12,10 @@ class UBlkPPConan(ConanFile):
     name = "ublkpp"
     version = "0.34.2"
 
-    homepage = "https://github.com/szmyd/ublkpp"
+    homepage = "https://github.com/ebay/ublkpp"
     description = "A UBlk library for CPP application"
     topics = ("ublk")
-    url = "https://github.com/szmyd/ublkpp"
+    url = "https://github.com/ebay/ublkpp"
     license = "Apache-2.0"
 
     settings = "arch", "os", "compiler", "build_type"

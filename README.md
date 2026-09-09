@@ -1,7 +1,7 @@
 # ublkpp
 
-[![Conan Build](https://github.com/szmyd/ublkpp/actions/workflows/merge_build.yml/badge.svg?branch=main)](https://github.com/szmyd/ublkpp/actions/workflows/merge_build.yml)
-[![CodeCov](https://codecov.io/gh/szmyd/ublkpp/graph/badge.svg?token=2N5W3458RK)](https://codecov.io/gh/szmyd/ublkpp)
+[![Conan Build](https://github.com/ebay/ublkpp/actions/workflows/merge_build.yml/badge.svg?branch=main)](https://github.com/ebay/ublkpp/actions/workflows/merge_build.yml)
+[![CodeCov](https://codecov.io/gh/ebay/ublkpp/graph/badge.svg?token=2N5W3458RK)](https://codecov.io/gh/ebay/ublkpp)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 > A high-performance C++23 library providing RAID0/1/10 support for Linux's userspace block (ublk) driver
@@ -41,7 +41,7 @@
 ### Build Library
 
 ```bash
-git clone https://github.com/szmyd/ublkpp
+git clone https://github.com/ebay/ublkpp
 cd ublkpp
 ./prepare_v2.sh
 conan build -s:h build_type=Debug --build missing .
@@ -331,6 +331,6 @@ Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for detai
 ---
 
 **Links:**
-- 🐛 [Report Issues](https://github.com/szmyd/ublkpp/issues)
-- 💬 [Discussions](https://github.com/szmyd/ublkpp/discussions)
+- 🐛 [Report Issues](https://github.com/ebay/ublkpp/issues)
+- 💬 [Discussions](https://github.com/ebay/ublkpp/discussions)
 - 📖 [ublksrv GitHub](https://github.com/ublk-org/ublksrv)

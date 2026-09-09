@@ -131,7 +131,7 @@ jobs:
     - name: Retrieve Recipe
       uses: actions/checkout@v4
       with:
-        repository: szmyd/ublkpp
+        repository: ebay/ublkpp
         ref: ${{ inputs.branch }}
       if: ${{ inputs.testing == 'False' }}
 
