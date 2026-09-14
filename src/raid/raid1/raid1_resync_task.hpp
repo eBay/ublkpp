@@ -134,6 +134,11 @@ public:
     // Number of times __yield() has been called. Tests poll this to wait for at least one
     // resync sweep without relying on wall-clock timing.
     uint64_t yield_count() const noexcept { return _yield_count.load(std::memory_order_acquire); }
+
+    bool is_copying() const noexcept {
+        auto s = _state.load(std::memory_order_acquire);
+        return s == resync_state::ACTIVE || s == resync_state::SLEEPING;
+    }
 };
 
 // RAII guard that calls enqueue_write() on construction and dequeue_write() on destruction.
