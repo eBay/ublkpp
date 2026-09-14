@@ -1,5 +1,6 @@
 #include "ublkpp/raid.hpp"
 #include "lib/memory_constants.hpp"
+#include "ublkpp/lib/cqe_state.hpp"
 
 #include <optional>
 #include <set>
@@ -20,11 +21,14 @@ SISL_OPTION_GROUP(raid1,
                   (chunk_size, "", "chunk_size", "The desired chunk_size for new Raid1 devices",
                    cxxopts::value< std::uint32_t >()->default_value("32768"), "<io_size>"),
                   (resync_level, "", "resync_level", "Resync prioritization level (1-32)",
-                   cxxopts::value< std::uint32_t >()->default_value("4"), "<io_size>"),
+                   cxxopts::value< std::uint32_t >()->default_value("20"), "<io_size>"),
                   (resync_delay, "", "resync_delay", "Delay between I/O and Resync context switches",
                    cxxopts::value< std::uint32_t >()->default_value("300"), "<microseconds> (us)"),
                   (avail_delay, "", "avail_delay", "Seconds between idle device availability probes",
-                   cxxopts::value< std::uint32_t >()->default_value("5"), "<seconds>"))
+                   cxxopts::value< std::uint32_t >()->default_value("5"), "<seconds>"),
+                  (resync_write_cap, "", "resync_write_cap",
+                   "Max concurrent user writes when resync is copying (0 = disabled)",
+                   cxxopts::value< std::uint32_t >()->default_value("16"), "<count>"))
 
 namespace ublkpp {
 
@@ -122,6 +126,7 @@ Raid1Disk::Raid1Disk(boost::uuids::uuid const& uuid, std::shared_ptr< ublk_disk 
     _resync_task = std::make_shared< Raid1ResyncTask >(
         _dirty_bitmap, _reserved_size, block_size(), params()->basic.max_sectors << SECTOR_SHIFT, &_resync_mode,
         resync_slots, be32toh(_sb->fields.bitmap.chunk_size), _raid_metrics);
+    _resync_write_cap = SISL_OPTIONS["resync_write_cap"].as< uint32_t >();
 
     // Write the up-to-date superblocks and mark devices as in use
     __become_active();
@@ -1015,6 +1020,25 @@ disk_task< int > Raid1Disk::async_iov(ublksrv_queue const* q, ublk_io_data const
 
     // Write / Discard / WriteZeroes: replicate to both devices
     auto const state = __capture_route_state();
+
+    // Backpressure: when resync is copying, yield via NOP SQE until concurrent writes drop to
+    // cap. Uses a frame-local cqe_state (_owner=nullptr) to avoid exhausting the async_io pool
+    // (pre-reserved to max_sqes_per_io=2 for the two leg writes).
+    if (_resync_write_cap > 0 && _resync_enabled.load(std::memory_order_relaxed) && _resync_task &&
+        _resync_task->is_copying()) {
+        if (auto* m = volume_metrics(q)) {
+            cqe_state yield_cs{};
+            while (_resync_task->is_copying() &&
+                   m->_queued_writes.load(std::memory_order_relaxed) > _resync_write_cap) {
+                auto* sqe = next_sqe(q);
+                if (!sqe) break;
+                yield_cs = {};
+                io_uring_prep_nop(sqe);
+                sqe->user_data = sisl::async::encode_managed_user_data(&yield_cs);
+                co_await yield_cs;
+            }
+        }
+    }
 
     // Register this write's LBA range in the region tracker so resync skips only the
     // conflicting chunk rather than pausing globally.

@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.37.0] - 2026-09-10
+
+### Added
+
+- **RAID1 dynamic write backpressure during resync**: `Raid1Disk::async_iov` now yields via a NOP
+  io_uring SQE when resync is actively copying and concurrent user writes exceed a configurable cap
+  (default 16). Resync uses a blocking `sync_iov` that competes at the device queue level with user
+  I/Os; capping in-flight writes reduces the effective queue wait per resync copy from ~38ms (under
+  fio iodepth=16) to near-idle levels, significantly accelerating resync throughput while fio is
+  running. The cap is disabled automatically when resync is not copying (IDLE/STOPPING state), so
+  there is no overhead on healthy arrays. Configurable via `--resync_write_cap <N>` (0 = disabled).
+
 ## [0.36.0] - 2026-07-21
 
 ### Added
