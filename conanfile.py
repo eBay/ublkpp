@@ -10,7 +10,7 @@ required_conan_version = ">=2.0"
 
 class UBlkPPConan(ConanFile):
     name = "ublkpp"
-    version = "0.37.5"
+    version = "0.37.6"
 
     homepage = "https://github.com/ebay/ublkpp"
     description = "C++23 library providing RAID support for Linux userspace block (ublk) driver"
