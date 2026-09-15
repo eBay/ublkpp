@@ -1016,28 +1016,38 @@ disk_task< int > Raid1Disk::async_iov(ublksrv_queue const* q, ublk_io_data const
     RLOGT("Received {}: [tag:{:#0x}] [lba:{:#0x}|len:{:#0x}] [uuid:{}]", op == UBLK_IO_OP_READ ? "READ" : "WRITE",
           data->tag, addr >> params()->basic.logical_bs_shift, len, _str_uuid)
 
-   // Backpressure: when resync is copying, yield via NOP SQE until concurrent writes drop to
-    // cap. Uses a frame-local cqe_state (_owner=nullptr) to avoid exhausting the async_io pool
-    // (pre-reserved to max_sqes_per_io=2 for the two leg writes).
-    if (_resync_write_cap > 0 && _resync_enabled.load(std::memory_order_relaxed) && _resync_task &&
-        _resync_task->is_copying()) {
-        if (auto* m = volume_metrics(q)) {
-            cqe_state yield_cs{};
-            while (_resync_task->is_copying() &&
-                   m->_queued_writes.load(std::memory_order_relaxed) > _resync_write_cap) {
-                auto* sqe = next_sqe(q);
-                if (!sqe) break;
-                yield_cs = {};
-                io_uring_prep_nop(sqe);
-                sqe->user_data = sisl::async::encode_managed_user_data(&yield_cs);
-                co_await yield_cs;
-            }
-        }
-    }
-
     if (op == UBLK_IO_OP_READ) co_return co_await __failover_read_async(q, data, iovecs, nr_vecs, addr, len);
 
     // Write / Discard / WriteZeroes: replicate to both devices
+    //
+    // Backpressure: semaphore-acquire a write slot during resync. Uses _resync_active_writes (not
+    // _queued_writes) so only writes that have passed this gate count toward the cap — avoiding the
+    // deadlock where all queued writes block simultaneously and the counter never decrements.
+    // Frame-local cqe_state bypasses async_io's pool (pre-reserved to max_sqes_per_io=2).
+    struct ResyncSlotGuard {
+        std::atomic< uint32_t >* _counter{nullptr};
+        ~ResyncSlotGuard() noexcept {
+            if (_counter) _counter->fetch_sub(1, std::memory_order_relaxed);
+        }
+    } _resync_slot;
+    if (_resync_write_cap > 0 && _resync_enabled.load(std::memory_order_relaxed) && _resync_task &&
+        _resync_task->is_copying()) {
+        cqe_state yield_cs{};
+        while (_resync_task->is_copying()) {
+            uint32_t cur = _resync_active_writes.load(std::memory_order_relaxed);
+            if (cur < _resync_write_cap &&
+                _resync_active_writes.compare_exchange_weak(cur, cur + 1, std::memory_order_relaxed)) {
+                _resync_slot._counter = &_resync_active_writes;
+                break;
+            }
+            auto* sqe = next_sqe(q);
+            if (!sqe) break; // ring full: proceed without throttling rather than busy-spin
+            yield_cs = {};
+            io_uring_prep_nop(sqe);
+            sqe->user_data = sisl::async::encode_managed_user_data(&yield_cs);
+            co_await yield_cs;
+        }
+    }
     auto const state = __capture_route_state();
 
     // Register this write's LBA range in the region tracker so resync skips only the
