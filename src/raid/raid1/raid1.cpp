@@ -28,7 +28,7 @@ SISL_OPTION_GROUP(raid1,
                    cxxopts::value< std::uint32_t >()->default_value("5"), "<seconds>"),
                   (resync_write_cap, "", "resync_write_cap",
                    "Max concurrent user writes when resync is copying (0 = disabled)",
-                   cxxopts::value< std::uint32_t >()->default_value("64"), "<count>"))
+                   cxxopts::value< std::uint32_t >()->default_value("8"), "<count>"))
 
 namespace ublkpp {
 

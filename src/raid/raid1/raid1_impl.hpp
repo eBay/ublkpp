@@ -48,7 +48,7 @@ class Raid1Disk : public ublk_disk {
     std::shared_ptr< ublkpp::UblkRaidMetrics > _raid_metrics;
     // Active Re-Sync Task
     std::atomic< bool > _resync_enabled{true};
-    uint32_t _resync_write_cap{32};
+    uint32_t _resync_write_cap{8};
     std::atomic< uint32_t > _resync_active_writes{0};
 
     // Copy mode for the current/next resync, read by toggle_resync at every launch and persisted
