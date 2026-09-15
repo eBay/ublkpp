@@ -28,7 +28,7 @@ SISL_OPTION_GROUP(raid1,
                    cxxopts::value< std::uint32_t >()->default_value("5"), "<seconds>"),
                   (resync_write_cap, "", "resync_write_cap",
                    "Max concurrent user writes when resync is copying (0 = disabled)",
-                   cxxopts::value< std::uint32_t >()->default_value("4"), "<count>"))
+                   cxxopts::value< std::uint32_t >()->default_value("6"), "<count>"))
 
 namespace ublkpp {
 
@@ -1016,12 +1016,7 @@ disk_task< int > Raid1Disk::async_iov(ublksrv_queue const* q, ublk_io_data const
     RLOGT("Received {}: [tag:{:#0x}] [lba:{:#0x}|len:{:#0x}] [uuid:{}]", op == UBLK_IO_OP_READ ? "READ" : "WRITE",
           data->tag, addr >> params()->basic.logical_bs_shift, len, _str_uuid)
 
-    if (op == UBLK_IO_OP_READ) co_return co_await __failover_read_async(q, data, iovecs, nr_vecs, addr, len);
-
-    // Write / Discard / WriteZeroes: replicate to both devices
-    auto const state = __capture_route_state();
-
-    // Backpressure: when resync is copying, yield via NOP SQE until concurrent writes drop to
+   // Backpressure: when resync is copying, yield via NOP SQE until concurrent writes drop to
     // cap. Uses a frame-local cqe_state (_owner=nullptr) to avoid exhausting the async_io pool
     // (pre-reserved to max_sqes_per_io=2 for the two leg writes).
     if (_resync_write_cap > 0 && _resync_enabled.load(std::memory_order_relaxed) && _resync_task &&
@@ -1039,6 +1034,11 @@ disk_task< int > Raid1Disk::async_iov(ublksrv_queue const* q, ublk_io_data const
             }
         }
     }
+
+    if (op == UBLK_IO_OP_READ) co_return co_await __failover_read_async(q, data, iovecs, nr_vecs, addr, len);
+
+    // Write / Discard / WriteZeroes: replicate to both devices
+    auto const state = __capture_route_state();
 
     // Register this write's LBA range in the region tracker so resync skips only the
     // conflicting chunk rather than pausing globally.
