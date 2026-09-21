@@ -1061,7 +1061,7 @@ disk_task< int > Raid1Disk::async_iov(ublksrv_queue const* q, ublk_io_data const
         // __become_clean's dirty_pages() gate cannot pass while this region is in-flight.
         bool const become_degraded_ok = [&] {
             std::lock_guard lock(_clean_transition_mutex);
-            __dirty_region_untaint(addr, len);
+            _dirty_bitmap->dirty_region(addr, len);
             return __become_degraded(false, &state);
         }();
         if (!become_degraded_ok) co_return -EAGAIN;
@@ -1144,7 +1144,7 @@ io_result Raid1Disk::sync_iov(uint8_t op, iovec* iovecs, uint32_t nr_vecs, off_t
         // __become_clean's dirty_pages() gate cannot pass while this region is in-flight.
         bool const become_degraded_ok = [&] {
             std::lock_guard lock(_clean_transition_mutex);
-            __dirty_region_untaint(static_cast< uint64_t >(addr), len);
+            _dirty_bitmap->dirty_region(static_cast< uint64_t >(addr), len);
             return __become_degraded(false, &state);
         }();
         if (!become_degraded_ok)

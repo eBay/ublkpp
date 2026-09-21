@@ -96,12 +96,11 @@ class Raid1Disk : public ublk_disk {
     // likewise. Used identically by both async_iov and sync_iov.
     bool __backup_writable(RouteState const& state, uint64_t addr, uint32_t len) const noexcept;
 
-    // Re-dirty a region during live I/O and, when a ZERO_TEST rebuild is in progress, taint the copy
-    // mode to CHECK first: the target leg may now hold written (non-zero) data here, so its
-    // read-zero-where-unallocated assumption no longer holds. Monotonic CAS (no-op unless ZERO_TEST;
-    // BLIND/CHECK are already safe on any destination). The mode store is sequenced before the bitmap
-    // set so a concurrent resync observes CHECK when it re-processes the region. Callers already hold
-    // _clean_transition_mutex around the dirty_region; the CAS is a standalone atomic op.
+    // Re-dirty a region during live I/O and downgrade ZERO_TEST→CHECK first: device C may already
+    // hold partial resync data here, so its read-zero-where-unallocated assumption is void. Monotonic
+    // CAS (no-op unless ZERO_TEST; BLIND/CHECK are already safe). The mode store is sequenced before
+    // the bitmap set so a concurrent resync observes CHECK when it re-processes the region. Callers
+    // already hold _clean_transition_mutex around the dirty_region; the CAS is a standalone atomic op.
     void __dirty_region_untaint(uint64_t addr, uint32_t len) noexcept;
 
     // Internal routines
