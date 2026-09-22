@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.36.2] - 2026-09-21
+
+### Fixed
+
+- **RAID1 resync CPU starvation under client I/O**: the resync thread was reset to
+  `SCHED_OTHER/0` (a prior commit's incorrect "safety" measure), leaving it at the mercy of
+  CFS timeslicing behind queue threads running at `SCHED_FIFO/99`. On a 2-CPU pod with 2
+  queue threads, the resync thread only ran when both queue threads simultaneously blocked on
+  io_uring — rare at high IOPS. Changed to `SCHED_FIFO/1` so the resync thread preempts
+  all `SCHED_OTHER` work but always yields immediately to the `SCHED_FIFO/99` queue threads.
+- **Premature ZERO_TEST → CHECK mode downgrade on first client write**: `__dirty_region_untaint`
+  performed the ZERO_TEST→CHECK CAS at all three call sites, including Site 2
+  (`backup_write=false` — region already dirty, resync has not yet written to device C). On
+  the first client write after resync launch, Site 2 permanently downgraded the mode to
+  CHECK, causing all subsequent copies to issue an extra device C read per chunk for the
+  entire rebuild (~50% extra I/O). Added a `downgrade` parameter (default `true`); Site 2
+  passes `false` since the zero assumption on device C still holds for uncopied dirty regions.
+
 ## [0.36.0] - 2026-07-21
 
 ### Added
