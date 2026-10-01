@@ -17,29 +17,28 @@
 #include <ublkpp/raid.hpp>
 #include <ublkpp/target.hpp>
 
-SISL_OPTION_GROUP(ublkpp_disk,
-                  (uuid, "", "vol_id", "Volume UUID to use (else random)", ::cxxopts::value< std::string >(), ""),
-                  (loop, "", "loop", "Attach a single device 1-to-1", ::cxxopts::value< std::string >(), "<path>"),
-                  (raid0, "", "raid0", "Devices for RAID0 device", ::cxxopts::value< std::vector< std::string > >(),
-                   "<path>[,<path>,...]"),
-                  (raid1, "", "raid1", "Devices for RAID1 device", ::cxxopts::value< std::vector< std::string > >(),
-                   "<path>[,<path>,...]"),
-                  (raid10, "", "raid10", "Devices for RAID10 device", ::cxxopts::value< std::vector< std::string > >(),
-                   "<path>[,<path>,...]"),
-                  (stripe_size, "", "stripe_size", "RAID-0 Stripe Size",
-                   ::cxxopts::value< uint32_t >()->default_value("131072"), ""),
-                  (craft, "", "craft", "CRAFT in-process reference volume of the given size (MiB)",
-                   ::cxxopts::value< uint64_t >(), "<size_mb>"),
-                  (craft_tcp, "", "craft_tcp",
-                   "CRAFT over TCP: comma-separated host:port replica endpoints (run a "
-                   "craft_reference_tcp_srv per endpoint first)",
-                   ::cxxopts::value< std::string >(), "<host:port,...>"),
-                  (device_id, "", "device_id", "Recover existing device",
-                   cxxopts::value< int32_t >()->default_value("-1"), "<ublkid>"),
-                  (assume_clean, "", "assume_clean",
-                   "RAID1: assert a new leg reads zero where unallocated; its rebuild then skips "
-                   "all-zero regions (thin-preserving)",
-                   cxxopts::value< bool >()->default_value("false")->implicit_value("true"), ""))
+SISL_OPTION_GROUP(
+    ublkpp_disk, (uuid, "", "vol_id", "Volume UUID to use (else random)", ::cxxopts::value< std::string >(), ""),
+    (loop, "", "loop", "Attach a single device 1-to-1", ::cxxopts::value< std::string >(), "<path>"),
+    (raid0, "", "raid0", "Devices for RAID0 device", ::cxxopts::value< std::vector< std::string > >(),
+     "<path>[,<path>,...]"),
+    (raid1, "", "raid1", "Devices for RAID1 device", ::cxxopts::value< std::vector< std::string > >(),
+     "<path>[,<path>,...]"),
+    (raid10, "", "raid10", "Devices for RAID10 device", ::cxxopts::value< std::vector< std::string > >(),
+     "<path>[,<path>,...]"),
+    (stripe_size, "", "stripe_size", "RAID-0 Stripe Size", ::cxxopts::value< uint32_t >()->default_value("131072"), ""),
+    (craft, "", "craft", "CRAFT in-process reference volume of the given size (MiB)", ::cxxopts::value< uint64_t >(),
+     "<size_mb>"),
+    (craft_tcp, "", "craft_tcp", "CRAFT over TCP: provide the server config details through server_config_file option",
+     cxxopts::value< bool >()->default_value("false"), ""),
+    (server_config_file, "", "server_config_file", "Server configuration json (optional)",
+     ::cxxopts::value< std::string >()->default_value(""), "<file>"),
+    (device_id, "", "device_id", "Recover existing device", cxxopts::value< int32_t >()->default_value("-1"),
+     "<ublkid>"),
+    (assume_clean, "", "assume_clean",
+     "RAID1: assert a new leg reads zero where unallocated; its rebuild then skips "
+     "all-zero regions (thin-preserving)",
+     cxxopts::value< bool >()->default_value("false")->implicit_value("true"), ""))
 
 #define ENABLED_OPTIONS logging, ublkpp_tgt, raid1, ublkpp_disk
 
@@ -166,19 +165,17 @@ Result create_craft(boost::uuids::uuid const& id, uint64_t size_mb) {
 // CRAFT over TCP: connect to standalone craft_reference_tcp_srv replicas at the given host:port endpoints. The
 // disk logs in to the first (leader), self-sizes from its login geometry (capacity / block size / max transfer),
 // and drives writes/reads over the ON-RING transport at QD>1. Start one craft_reference_tcp_srv per endpoint.
-Result create_craft_tcp(boost::uuids::uuid const& id, std::string const& endpoints) {
+Result create_craft_tcp(boost::uuids::uuid const& id, std::string const& server_config_file) {
+    if (server_config_file.empty()) { return std::unexpected(std::make_error_condition(std::errc::invalid_argument)); }
+    std::ifstream istrm(server_config_file, std::ios::binary);
+    nlohmann::json j;
+    istrm >> j;
     std::vector< craft::replica_endpoint > members;
-    for (std::size_t start = 0; start <= endpoints.size();) {
-        auto const comma = endpoints.find(',', start);
-        auto const addr = endpoints.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
-        if (!addr.empty()) {
-            craft::replica_endpoint m;
-            m.id = boost::uuids::random_generator()(); // cosmetic: the server routes by index / fences by term, not id
-            m.addr = addr;                             // "host:port"; tcp_cluster splits on the last ':'
-            members.push_back(std::move(m));
-        }
-        if (comma == std::string::npos) break;
-        start = comma + 1;
+    for (auto const& json_m : j.at("members")) {
+        craft::replica_endpoint m;
+        m.id = boost::uuids::string_generator()(json_m.at("uuid").get< std::string >());
+        m.addr = fmt::format("{}:{}", json_m.at("host").get< std::string >(), json_m.at("tcp_port").get< uint16_t >());
+        members.push_back(std::move(m));
     }
     if (members.empty()) {
         LOGERROR("craft_tcp: no endpoints given")
@@ -218,7 +215,7 @@ int main(int argc, char* argv[]) {
     } else if (0 < SISL_OPTIONS["craft"].count()) {
         res = create_craft(vol_id, SISL_OPTIONS["craft"].as< uint64_t >());
     } else if (0 < SISL_OPTIONS["craft_tcp"].count()) {
-        res = create_craft_tcp(vol_id, SISL_OPTIONS["craft_tcp"].as< std::string >());
+        res = create_craft_tcp(vol_id, SISL_OPTIONS["server_config_file"].as< std::string >());
     } else
         std::cout << SISL_PARSER.help({}) << std::endl;
 
