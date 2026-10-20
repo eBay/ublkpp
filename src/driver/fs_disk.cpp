@@ -103,6 +103,13 @@ FSDisk::FSDisk(std::filesystem::path const& path, std::string const& parent_id) 
         DLOGE("fstat({}) failed: {}", str_path, strerror(errno))
         throw std::runtime_error("fstat Failed!");
     }
+    // Reject backing files with no write permission bits for anyone, independent of the
+    // process's effective privileges -- root's CAP_DAC_OVERRIDE would otherwise let open()
+    // silently succeed R/W on a file that was deliberately marked read-only.
+    if ((st.st_mode & (S_IWUSR | S_IWGRP | S_IWOTH)) == 0) {
+        DLOGE("backing file {} has no write permission bits set", str_path)
+        throw std::runtime_error("Backing file is read-only!");
+    }
 
     uint64_t bytes{0};
     _block_device = S_ISBLK(st.st_mode);
