@@ -37,9 +37,33 @@ jobs:
       tooling: None
     if: ${{ github.event_name != 'pull_request' }}
 
+  CraftClientDeps:
+    uses: ebay/craft_client/.github/workflows/build_dependencies.yml@dev/v0.x
+    with:
+      branch: dev/v0.x
+      platform: ${{ inputs.platform }}
+      build-type: ${{ inputs.build-type }}
+      malloc-impl: ${{ inputs.malloc-impl }}
+      compiler: ${{ inputs.compiler }}
+      conan-channel: ${{ inputs.conan-channel }}
+      tooling: None
+    if: ${{ github.event_name != 'pull_request' }}
+
+  NuraftMesgDeps:
+    uses: ebay/nuraft_mesg/.github/workflows/build_dependencies.yml@dev/v5.x
+    with:
+      branch: dev/v5.x
+      platform: ${{ inputs.platform }}
+      build-type: ${{ inputs.build-type }}
+      malloc-impl: ${{ inputs.malloc-impl }}
+      compiler: ${{ inputs.compiler }}
+      conan-channel: ${{ inputs.conan-channel }}
+      tooling: None
+    if: ${{ github.event_name != 'pull_request' }}
+
   UblkPPDeps:
-    needs: SislDeps
-    if: ${{ always() && (needs.SislDeps.result == 'success' || needs.SislDeps.result == 'skipped') }}
+    needs: [SislDeps, CraftClientDeps, NuraftMesgDeps]
+    if: ${{ always() && (needs.SislDeps.result == 'success' || needs.SislDeps.result == 'skipped') && (needs.CraftClientDeps.result == 'success' || needs.CraftClientDeps.result == 'skipped') && (needs.NuraftMesgDeps.result == 'success' || needs.NuraftMesgDeps.result == 'skipped') }}
     uses: ./.github/workflows/build_dependencies.yml
     with:
       branch: ${{ github.ref }}
