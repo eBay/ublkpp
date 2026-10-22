@@ -33,6 +33,7 @@ extern "C" {
 
 #include "ublkpp/drivers.hpp"
 #include "ublkpp/raid.hpp"
+#include "ublkpp/craft_disk.hpp" // make_craft_disk_local (in-process CRAFT reference, no backing files)
 
 #include "lib/common.hpp"
 #include "mock_ublksrv/mock_ublksrv.hpp"
@@ -235,8 +236,11 @@ static int ublkpp_init(struct thread_data* td) {
     char const* disk_files = (opts && opts->disk_files) ? opts->disk_files : "";
     uint32_t chunk_size = (opts && opts->raid_chunk_size) ? opts->raid_chunk_size : 32768u;
 
+    std::string const type(disk_type);
+    bool const is_craft = (type == "craft");
+
     auto paths = split_colon(disk_files);
-    if (paths.empty()) {
+    if (!is_craft && paths.empty()) {
         log_err("ublkpp_fio: disk_files option is required\n");
         return -1;
     }
@@ -245,18 +249,27 @@ static int ublkpp_init(struct thread_data* td) {
     // 64 MiB overhead for RAID metadata / superblocks
     uint64_t const disk_size = ((td->o.size + td->o.start_offset + 511ULL) & ~511ULL) + (64ULL << 20);
 
-    for (auto const& p : paths) {
-        if (!ensure_file_size(p, disk_size)) {
-            log_err("ublkpp_fio: cannot allocate backing file %s\n", p.c_str());
-            return -1;
+    // CRAFT is an in-process reference cluster -- no backing files to allocate.
+    if (!is_craft) {
+        for (auto const& p : paths) {
+            if (!ensure_file_size(p, disk_size)) {
+                log_err("ublkpp_fio: cannot allocate backing file %s\n", p.c_str());
+                return -1;
+            }
         }
     }
 
     // Build the disk
     std::shared_ptr< ublkpp::ublk_disk > disk;
     try {
-        std::string const type(disk_type);
-        if (type == "fsdisk") {
+        if (type == "craft") {
+            // A 3-replica in-process CRAFT cluster, self-sized from `disk_size` (no files, no server, no kernel).
+            // Drives the ON-RING transport: CraftDisk::prepare binds the client to MockUblksrv's ring, so fio at
+            // iodepth>1 puts many replica legs in flight together -- the depth CRAFT correctness needs. Each fio
+            // job builds its own cluster; writes + verify hit the same in-process disk within the run.
+            disk = ublkpp::make_craft_disk_local(boost::uuids::random_generator()(), /*n=*/3, /*page_size=*/4096,
+                                                 /*capacity=*/disk_size);
+        } else if (type == "fsdisk") {
             disk = ublkpp::make_fs_disk(paths[0]);
         } else if (type == "raid0") {
             if (paths.size() < 2) {
@@ -360,15 +373,9 @@ static enum fio_q_status ublkpp_queue(struct thread_data* td, struct io_u* io_u)
         return FIO_Q_COMPLETED;
     }
 
-    // Handle synchronous completion (0 sub_cmds means the op was a no-op
-    // e.g. flush on a direct-IO disk)
-    if (res.value() == 0) {
-        io_u->error = 0;
-        io_u->resid = 0;
-        ed->free_tags.push_back(tag);
-        return FIO_Q_COMPLETED;
-    }
-
+    // Synchronous completions (0 sub_cmds: flush, pre-SQE error) are recorded on the mock's
+    // completed list at submit and delivered exactly once by the next poll(), so they are queued
+    // like any other IO — completing them here too would double-report the tag.
     io_u->engine_data = reinterpret_cast< void* >(static_cast< uintptr_t >(tag));
     ed->pending[tag] = io_u;
     return FIO_Q_QUEUED;

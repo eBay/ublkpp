@@ -19,6 +19,12 @@ namespace ublkpp {
 // submit_io starts a disk async_iov task and returns the number of registered CqeStates.
 // inject_cqe delivers synthetic results for each suspended co_await *state without io_uring round-trips.
 // poll() drains real io_uring CQEs for disks that submit actual SQEs (e.g. FSDisk).
+//
+// Completion model mirrors the production target (__handle_io_async in ublkpp_tgt.cpp): each submit
+// wraps async_iov in a recorder coroutine whose tail pushes {tag, result} onto _completed, so the tag
+// travels in the coroutine frame and no CQE→tag attribution is ever needed — an IO finished
+// transitively by a foreign transport CQE (CraftDisk) completes exactly like a RAID/fs one. Each
+// completion is delivered EXACTLY ONCE, by whichever of poll() / inject_cqe() drains _completed next.
 class MockUblksrv {
 public:
     struct Completion {
@@ -45,9 +51,10 @@ public:
     // Drain io_uring CQEs until at least min_completions are collected or timeout expires.
     std::vector< Completion > poll(int min_completions, std::chrono::milliseconds timeout);
 
-    // New async path only. Deliver a synthetic result to the cqe_state currently suspended
-    // in the disk_task for the given tag. Resumes the task; returns a completion when the
-    // task runs to completion. Call once per awaited stripe for multi-stripe IOs.
+    // Deliver a synthetic result to the cqe_state currently suspended in the disk_task for the
+    // given tag (call once per awaited stripe for multi-stripe IOs), then drain _completed.
+    // Returns every completion the resume produced — usually the given tag's, plus any tasks it
+    // unblocked as a side effect, plus any not-yet-drained synchronous completion (e.g. flush).
     std::vector< Completion > inject_cqe(int tag, int result);
 
     // Per-tag sector-aligned I/O buffer (max_io_size = DEF_BUF_SIZE bytes).
@@ -73,7 +80,12 @@ private:
         iovec iov{};
     };
 
-    void process_cqe(io_uring_cqe* cqe, std::vector< Completion >& out);
+    void process_cqe(io_uring_cqe* cqe);
+
+    // Recorder coroutine — the mock's __handle_io_async: co_awaits the disk's async_iov and records
+    // {tag, result} on _completed when the whole IO finishes, whichever CQE (ours or foreign) drove
+    // the final resume.
+    disk_task< int > run_io(int tag, int qid, uint8_t op, uint64_t addr);
 
     int _q_depth;
     ublksrv_dev _dev{};
@@ -85,8 +97,12 @@ private:
     // async_io _pool — one per tag, mirrors what init_queue does via placement new
     std::vector< async_io > _io_states;
 
-    // hot_task handles for the async API path — one optional slot per tag
+    // hot_task handles for the async API path — one optional slot per tag. The slot owns the
+    // recorder frame (and, through it, the disk_task frame); reset on tag reuse.
     std::vector< std::optional< hot_task< int > > > _async_tasks;
+
+    // Completions recorded by run_io tails, drained (exactly once) by poll() / inject_cqe().
+    std::vector< Completion > _completed;
 
     // Aligned I/O buffers — one per tag, DEF_BUF_SIZE bytes each
     std::vector< uint8_t > _io_buf_storage;

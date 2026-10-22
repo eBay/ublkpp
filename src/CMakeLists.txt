@@ -14,6 +14,7 @@ list(APPEND LIBRARY_OBJECTS
   $<TARGET_OBJECTS:raid0>
   $<TARGET_OBJECTS:raid1>
   $<TARGET_OBJECTS:fs_disk>
+  $<TARGET_OBJECTS:craft_disk>
   $<TARGET_OBJECTS:ublkpp_tgt>
   $<TARGET_OBJECTS:ublk_disk>
   $<TARGET_OBJECTS:ublk_metrics>
@@ -23,6 +24,7 @@ list(APPEND LIBRARY_LINKS
     isa-l::isa-l
     ublksrv::ublksrv
     stdexec::stdexec
+    craft_client::craft_reference
   )
 
 add_library(ublkpp)

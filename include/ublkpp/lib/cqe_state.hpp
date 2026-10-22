@@ -65,18 +65,22 @@ struct async_io {
     cqe_state* next_state();
 };
 
-// Tracks a single inflight sub-operation. Stored in async_io::_pool (pre-reserved std::vector,
-// so push_back is pointer-stable). _result and _result_ready are written by run_queue_loop before resuming
-// _waiter. Implements the awaitable protocol directly: co_await *state suspends until the CQE
-// arrives.
+// Tracks a single inflight sub-operation, stored in async_io::_pool (pre-reserved std::vector, so its address is
+// pointer-stable). Extends sisl::async::cqe_state -- the SHARED completion base (_result / _result_ready + the
+// managed-user-data encode/decode contract that every sisl::async-aware submitter uses) -- with a coroutine
+// _waiter and an _owner back-pointer. run_queue_loop writes _result/_result_ready and resumes _waiter.
 //
-// _owner is nullable: per-IO cqe_states (build_cqe_state_data path) point at the slot's
-// async_io so an exception on resume can be reported via ublksrv_complete_io. Stand-alone
-// cqe_states set _owner = nullptr; callers handle their own errors.
-struct cqe_state {
+// DELIBERATELY a distinct type from sisl::async::cqe_awaitable, not a leftover: run_queue_loop resumes _waiter
+// DIRECTLY (not via the base's _on_complete callback) precisely so it can CATCH a coroutine-body throw and
+// report it as -EIO on _owner->_tag -- cqe_awaitable resumes inside a noexcept thunk, where a throw would
+// std::terminate. It is also same-thread (reap + resume both on the queue thread, so no atomic hand-off is
+// needed) and must be MOVABLE to live in the pool, which cqe_awaitable (self-referencing, non-movable) is not.
+// The inherited _on_complete / _on_complete_ctx therefore stay null; completion goes through _waiter, above.
+//
+// _owner is nullable: per-IO cqe_states (build_cqe_state_data path) point at the slot's async_io so a throw can
+// be reported via ublksrv_complete_io. Stand-alone cqe_states set _owner = nullptr; callers handle their own.
+struct cqe_state : sisl::async::cqe_state {
     async_io* _owner{nullptr};
-    int _result{0};
-    bool _result_ready{false};
     std::coroutine_handle<> _waiter{};
 
     bool await_ready() const noexcept { return _result_ready; }
@@ -87,8 +91,9 @@ struct cqe_state {
 inline cqe_state* async_io::next_state() {
     RELEASE_ASSERT_LT(_pool.size(), _pool.capacity(),
                       "cqe_state pool exhausted; prepare_result::max_sqes_per_io underestimated")
-    _pool.push_back(cqe_state{._owner = this});
-    return &_pool.back();
+    cqe_state& s = _pool.emplace_back(); // in-place: a base class makes cqe_state a non-designatable aggregate
+    s._owner = this;
+    return &s;
 }
 
 // Allocates a new cqe_state for this I/O and encodes it for SQE user_data. Returns
