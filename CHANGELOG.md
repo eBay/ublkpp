@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.40.0] - Unreleased
 
+### Fixed
+
+- **`FSDisk` now rejects backing files/devices with no write permission bits for anyone**,
+  independent of the opening process's effective privileges. Previously it relied solely on the
+  kernel's `O_RDWR` open() check, which root bypasses via `CAP_DAC_OVERRIDE` — silently allowing
+  R/W access to a file deliberately marked read-only. This also makes
+  `FSDiskSyncIOV.WriteToReadOnlyFile` meaningful when test binaries run as root (e.g. in CI).
+
 ### Changed
 
 - **CraftDisk awaits CRAFT verbs directly** (requires `craft_client >= 0.3.0`, whose verbs return the
