@@ -41,7 +41,10 @@ SISL_OPTION_GROUP(ublkpp_tgt,
                    cxxopts::value< std::uint16_t >()->default_value("128"), "<qd>"),
                   (feature_zero_copy, "", "feature_zero_copy", "Enable ZeroCopy Feature", cxxopts::value< bool >(), ""),
                   (sched, "", "sched", "Queue thread scheduler policy (other, fifo)",
-                   cxxopts::value< std::string >()->default_value("fifo"), "<policy>"))
+                   cxxopts::value< std::string >()->default_value("fifo"), "<policy>"),
+                  (recovery_quiesce_timeout_ms, "", "recovery_quiesce_timeout_ms",
+                   "Max time to wait for a recovering device to be released by its previous daemon",
+                   cxxopts::value< std::uint32_t >()->default_value("10000"), "<ms>"))
 
 using namespace std::chrono_literals;
 
@@ -211,6 +214,38 @@ static void* ublksrv_queue_handler(std::shared_ptr< ublkpp_tgt_impl > target, in
     return NULL;
 }
 
+// The kernel quiesces a device asynchronously after its previous daemon exits, so a successor that
+// starts right away (e.g. a surge-rollout pod waiting on a host lock) can briefly see it still LIVE, or
+// QUIESCED with the old /dev/ublkcN not yet released; START_USER_RECOVERY then fails with -EBUSY.
+// Wait that out instead of failing recovery, which callers may treat as fatal for the volume.
+// DEAD (or any other) state is not retried: it will never become recoverable by waiting.
+static std::expected< void, std::error_condition > start_recovery(std::shared_ptr< ublkpp_tgt_impl > const& tgt) {
+    auto const timeout = std::chrono::milliseconds(SISL_OPTIONS["recovery_quiesce_timeout_ms"].as< uint32_t >());
+    auto const deadline = std::chrono::steady_clock::now() + timeout;
+    while (true) {
+        if (auto ret = ublksrv_ctrl_get_info(tgt->ctrl_dev); ret < 0) {
+            TLOGE("Cannot get Ctrl Info for disk {}: {}", tgt->device.load(), ret)
+            return std::unexpected(std::make_error_condition(std::errc::operation_not_permitted));
+        }
+        auto const state = ublksrv_ctrl_get_dev_info(tgt->ctrl_dev)->state;
+        if (UBLK_S_DEV_LIVE != state) {
+            auto const ret = ublksrv_ctrl_start_recovery(tgt->ctrl_dev);
+            if (0 <= ret) return {};
+            if (-EBUSY != ret || UBLK_S_DEV_QUIESCED != state) {
+                TLOGE("Cannot start recovery for disk {}: {} (state {})", tgt->device.load(), ret, state)
+                return std::unexpected(std::make_error_condition(std::errc::operation_not_permitted));
+            }
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            TLOGE("Disk {} still busy (state {}) after {}ms, previous daemon has not released it", tgt->device.load(),
+                  state, timeout.count())
+            return std::unexpected(std::make_error_condition(std::errc::device_or_resource_busy));
+        }
+        TLOGD("Waiting for disk {} to quiesce before recovery (state {})", tgt->device.load(), state)
+        std::this_thread::sleep_for(100ms);
+    }
+}
+
 static std::expected< std::filesystem::path, std::error_condition > start(std::shared_ptr< ublkpp_tgt_impl > tgt) {
     TLOGD("Initializing Ctrl Device")
     if (!tgt->device_recovering) { // NORMAL Path
@@ -227,14 +262,7 @@ static std::expected< std::filesystem::path, std::error_condition > start(std::s
             TLOGE("Cannot recover disk {}", tgt->device.load())
             return std::unexpected(std::make_error_condition(std::errc::operation_not_permitted));
         }
-        if (auto ret = ublksrv_ctrl_get_info(tgt->ctrl_dev); ret < 0) {
-            TLOGE("Cannot get Ctrl Info for disk {}", tgt->device.load())
-            return std::unexpected(std::make_error_condition(std::errc::operation_not_permitted));
-        }
-        if (auto ret = ublksrv_ctrl_start_recovery(tgt->ctrl_dev); ret < 0) {
-            TLOGE("Cannot start recovery for disk {}: {}", tgt->device.load(), ret)
-            return std::unexpected(std::make_error_condition(std::errc::operation_not_permitted));
-        }
+        if (auto res = start_recovery(tgt); !res) return std::unexpected(res.error());
     }
 
     auto const dinfo = ublksrv_ctrl_get_dev_info(tgt->ctrl_dev);

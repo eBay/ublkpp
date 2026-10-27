@@ -4,7 +4,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.40.0] - Unreleased
+## [0.40.1] - Unreleased
+
+### Fixed
+
+- **Recovery waits for the previous daemon to release the device** instead of failing on the first
+  `START_USER_RECOVERY` `-EBUSY`. The kernel quiesces a device asynchronously after its daemon exits, so an
+  immediate successor (e.g. a surge-rollout pod blocked on a host lock) could see it still `LIVE` or
+  `QUIESCED`-but-open and fail recovery. `start()` now polls the device state and retries `-EBUSY` for up to
+  `--recovery_quiesce_timeout_ms` (default 10000); `DEAD` devices still fail immediately.
+
+## [0.40.0]
 
 ### Fixed
 
