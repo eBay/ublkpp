@@ -94,7 +94,7 @@ void Raid1ResyncTask::_start(std::string str_uuid, std::shared_ptr< MirrorDevice
         RLOGI("Resync starting [uuid:{}] [mode:{}] to: {}", str_uuid, initial, *dirty_mirror->disk)
         auto const initial_resync_size = _dirty_bitmap->dirty_data_est();
         _initial_resync_bytes = initial_resync_size;
-        _last_progress_log = {};   // reset so first log fires ~5min into this resync
+        _last_progress_log = {}; // reset so first log fires ~5min into this resync
         // Set ourselves up with a buffer to do all the read/write operations from
         auto iov = iovec{.iov_base = nullptr, .iov_len = 0};
         if (auto err = ::posix_memalign(&iov.iov_base, _io_size, _max_size); 0 != err || nullptr == iov.iov_base)
@@ -369,15 +369,13 @@ resync_state Raid1ResyncTask::__run(auto& clean_mirror, auto& dirty_mirror, iove
 
     while (0 < nr_pages) {
         // Periodic progress log every 5 minutes (zero-overhead when gate is closed)
-        if (auto const now = std::chrono::steady_clock::now();
-            now - _last_progress_log >= std::chrono::minutes(5)) {
+        if (auto const now = std::chrono::steady_clock::now(); now - _last_progress_log >= std::chrono::minutes(5)) {
             _last_progress_log = now;
             if (_initial_resync_bytes > 0) {
                 auto const remaining = _dirty_bitmap->dirty_data_est();
-                auto const pct = 100.0 * (1.0 - static_cast< double >(remaining) /
-                                                static_cast< double >(_initial_resync_bytes));
-                RLOGI("Resync progress: {:.1f}% ({:.2f} GiB remaining of {:.2f} GiB)",
-                      pct,
+                auto const pct =
+                    100.0 * (1.0 - static_cast< double >(remaining) / static_cast< double >(_initial_resync_bytes));
+                RLOGI("Resync progress: {:.1f}% ({:.2f} GiB remaining of {:.2f} GiB)", pct,
                       static_cast< double >(remaining) / (1024.0 * 1024.0 * 1024.0),
                       static_cast< double >(_initial_resync_bytes) / (1024.0 * 1024.0 * 1024.0));
             }
