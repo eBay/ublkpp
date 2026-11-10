@@ -1,6 +1,9 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <optional>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -39,6 +42,37 @@ TEST(CraftDisk, RejectsBadPageSize) {
     auto const vol = boost::uuids::random_generator()();
     EXPECT_THROW((void)ublkpp::make_craft_disk_local(vol, 3, /*page_size=*/4000, uint64_t{64} << 20),
                  std::runtime_error);
+}
+
+namespace {
+// Port 1 on loopback has no listener, so a connect is refused immediately rather than hanging.
+std::vector< craft::replica_endpoint > dead_members(std::optional< craft::auth_credential > cred) {
+    std::vector< craft::replica_endpoint > members;
+    for (int i = 0; i < 3; ++i) {
+        members.push_back({.id = boost::uuids::random_generator()(), .addr = "127.0.0.1:1", .credential = cred});
+    }
+    return members;
+}
+
+std::string login_failure(std::vector< craft::replica_endpoint > members) {
+    try {
+        (void)ublkpp::make_craft_disk_tcp(std::move(members), boost::uuids::random_generator()());
+    } catch (std::runtime_error const& e) { return e.what(); }
+    return {};
+}
+} // namespace
+
+// An empty username is refused by craft_client before it connects, so AUTH_FAILED (rather than the unreachable
+// replicas) proves the credential reached the transport through make_craft_disk_tcp.
+TEST(CraftDisk, TcpForwardsCredential) {
+    auto const err = login_failure(dead_members(craft::auth_credential{.username = "", .password = "p"}));
+    EXPECT_NE(err.find("AUTH_FAILED"), std::string::npos) << err;
+}
+
+TEST(CraftDisk, TcpWithoutCredentialSkipsAuth) {
+    auto const err = login_failure(dead_members(std::nullopt));
+    EXPECT_FALSE(err.empty());
+    EXPECT_EQ(err.find("AUTH_FAILED"), std::string::npos) << err;
 }
 
 // Drive the on-ring CRAFT transport through the REAL ublk_disk path AT DEPTH. MockUblksrv owns an io_uring and

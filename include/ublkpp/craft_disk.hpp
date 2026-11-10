@@ -36,7 +36,8 @@ disk_handle make_craft_disk_local(craft::volume_id_t vol_id, uint32_t n = 3, uin
 
 // REMOTE replica servers over TCP. `members` are the {peer id, "host:port"} endpoints (index 0 is the leader
 // you first log in to); ALL geometry (capacity / block size / max transfer) comes from the server's login
-// response, so there is no max_tx to pass -- the server's volume defines it.
+// response, so there is no max_tx to pass -- the server's volume defines it. A member's `credential` makes every
+// connection to it AUTH first, fail-closed; a refusal is final for this disk, so re-create it from fresh attach info.
 disk_handle make_craft_disk_tcp(std::vector< craft::replica_endpoint > members, craft::volume_id_t vol_id,
                                 uint64_t client_token = k_craft_default_token);
 
