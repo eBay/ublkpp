@@ -73,6 +73,10 @@ class Raid1ResyncTask {
     std::atomic< resync_state > _state{resync_state::IDLE};
     static_assert(std::atomic< resync_state >::is_always_lock_free);
 
+    // For periodic progress logging in __run(): set at the start of each resync.
+    uint64_t _initial_resync_bytes{0};
+    std::chrono::steady_clock::time_point _last_progress_log{};
+
     // Tracks the LBA range of each in-flight write. Resync checks for overlap before
     // and after each copy so it only skips regions that actually conflict with a write;
     // unrelated regions proceed without any global pause.
