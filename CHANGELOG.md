@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Requires `craft_client` 0.5** (pin `[^0.4]` → `[^0.5]`) for CRAFT connection authentication (mutual CHAP).
+  `make_craft_disk_tcp` needs no API change: a `replica_endpoint` whose `credential` is set AUTHs every
+  connection to that replica, fail-closed; unset means no AUTH, which only a non-enforcing replica admits.
+- **`ublkpp_disk --craft_tcp`**: each `members` entry in `--server_config_file` accepts optional `"username"` /
+  `"password"` (both or neither) and sets that member's credential.
 - **CraftDisk awaits CRAFT verbs directly** (requires `craft_client >= 0.3.0`, whose verbs return the
   freestanding `sisl::async::light_task`): `async_iov` co_awaits `craft::read`/`craft::write` in its own frame,
   and the disk_task continuation carries the result to `ublksrv_complete_io`. The `run_craft_io` exec::task

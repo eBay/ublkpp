@@ -165,6 +165,8 @@ Result create_craft(boost::uuids::uuid const& id, uint64_t size_mb) {
 // CRAFT over TCP: connect to standalone craft_reference_tcp_srv replicas at the given host:port endpoints. The
 // disk logs in to the first (leader), self-sizes from its login geometry (capacity / block size / max transfer),
 // and drives writes/reads over the ON-RING transport at QD>1. Start one craft_reference_tcp_srv per endpoint.
+// A member with "username"/"password" AUTHs on every connection; without them, only a non-enforcing replica
+// (the reference server) admits the client.
 Result create_craft_tcp(boost::uuids::uuid const& id, std::string const& server_config_file) {
     if (server_config_file.empty()) { return std::unexpected(std::make_error_condition(std::errc::invalid_argument)); }
     std::ifstream istrm(server_config_file, std::ios::binary);
@@ -175,6 +177,15 @@ Result create_craft_tcp(boost::uuids::uuid const& id, std::string const& server_
         craft::replica_endpoint m;
         m.id = boost::uuids::string_generator()(json_m.at("uuid").get< std::string >());
         m.addr = fmt::format("{}:{}", json_m.at("host").get< std::string >(), json_m.at("tcp_port").get< uint16_t >());
+        auto const has_user = json_m.contains("username");
+        if (has_user != json_m.contains("password")) {
+            LOGERROR("craft_tcp: member {} needs both username and password, or neither", m.addr)
+            return std::unexpected(std::make_error_condition(std::errc::invalid_argument));
+        }
+        if (has_user) {
+            m.credential = craft::auth_credential{.username = json_m.at("username").get< std::string >(),
+                                                  .password = json_m.at("password").get< std::string >()};
+        }
         members.push_back(std::move(m));
     }
     if (members.empty()) {
