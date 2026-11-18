@@ -187,6 +187,13 @@ public:
     }
 
     std::error_condition replace_member(craft::peer_id_t const& old_id, craft::replica_endpoint const& member) {
+        // Validate against the client's members BEFORE building a backend: the TCP maker re-points the transport's
+        // slot, so a swap the client then rejects would leave the transport and the client disagreeing.
+        auto const ids = craft::member_ids(_client);
+        if (std::find(ids.begin(), ids.end(), old_id) == ids.end())
+            return std::make_error_condition(std::errc::no_such_device);
+        for (auto const& id : ids)
+            if (id == member.id && id != old_id) return std::make_error_condition(std::errc::invalid_argument);
         auto backend = _make_backend ? _make_backend(old_id, member) : nullptr;
         if (!backend) return std::make_error_condition(std::errc::operation_not_supported);
         auto const err = craft::replace_member(_client, old_id, std::move(backend));
