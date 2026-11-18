@@ -152,6 +152,64 @@ TEST(CraftDisk, ReplaceMemberOnALiveDisk) {
     EXPECT_TRUE(ublkpp::craft_disk::member_states(*disk)[2].caught_up);
 }
 
+// The swap with IO in flight (Copilot review on #17): data written before the swap reads back after it, writes
+// queued on the ring when the member is replaced complete successfully, and writes issued after the swap read back.
+TEST(CraftDisk, ReplaceMemberWithIoInFlight) {
+    constexpr uint32_t k_page = 4096;
+    constexpr int N = 4;
+    constexpr uint32_t k_sectors = k_page / 512;
+    auto disk = ublkpp::make_craft_disk_local(boost::uuids::random_generator()(), 3, k_page, uint64_t{64} << 20);
+    ublkpp::MockUblksrv mock(disk, /*q_depth=*/N, /*nr_queues=*/1);
+
+    auto write_blocks = [&](int first, uint8_t pattern, bool poll) {
+        for (int i = 0; i < N; ++i) {
+            auto* buf = static_cast< uint8_t* >(mock.io_buf(i));
+            std::memset(buf, pattern + i, k_page);
+            ASSERT_TRUE(
+                mock.submit_io(i, UBLK_IO_OP_WRITE, static_cast< uint64_t >(first + i) * k_sectors, k_sectors, buf)
+                    .has_value());
+        }
+        if (!poll) return;
+        auto const c = mock.poll(N, std::chrono::milliseconds{4000});
+        ASSERT_EQ(c.size(), static_cast< std::size_t >(N));
+        for (auto const& e : c)
+            EXPECT_GT(e.result, 0) << "write tag " << e.tag;
+    };
+    auto check_blocks = [&](int first, uint8_t pattern) {
+        for (int i = 0; i < N; ++i) {
+            auto* buf = static_cast< uint8_t* >(mock.io_buf(i));
+            std::memset(buf, 0, k_page);
+            ASSERT_TRUE(
+                mock.submit_io(i, UBLK_IO_OP_READ, static_cast< uint64_t >(first + i) * k_sectors, k_sectors, buf)
+                    .has_value());
+        }
+        auto const c = mock.poll(N, std::chrono::milliseconds{4000});
+        ASSERT_EQ(c.size(), static_cast< std::size_t >(N));
+        for (int i = 0; i < N; ++i) {
+            std::vector< uint8_t > const want(k_page, static_cast< uint8_t >(pattern + i));
+            EXPECT_EQ(0, std::memcmp(mock.io_buf(i), want.data(), k_page)) << "block " << first + i;
+        }
+    };
+
+    write_blocks(0, 0x20, /*poll=*/true); // before the swap
+
+    // Queue N writes on the ring WITHOUT polling, then swap member 2 while they are outstanding.
+    write_blocks(N, 0x40, /*poll=*/false);
+    auto const moved = ublkpp::craft_disk::member_states(*disk)[2].id;
+    ASSERT_FALSE(ublkpp::craft_disk::replace_member(*disk, moved, {.id = moved, .addr = "local"}));
+    auto const queued = mock.poll(N, std::chrono::milliseconds{4000});
+    ASSERT_EQ(queued.size(), static_cast< std::size_t >(N)) << "IO queued across the swap completes";
+    for (auto const& e : queued)
+        EXPECT_GT(e.result, 0) << "queued write tag " << e.tag;
+
+    write_blocks(2 * N, 0x60, /*poll=*/true); // after the swap
+
+    check_blocks(0, 0x20);
+    check_blocks(N, 0x40);
+    check_blocks(2 * N, 0x60);
+    (void)mock.poll(1 << 20, std::chrono::milliseconds{100}); // drain detached keep_alive legs
+}
+
 TEST(CraftDisk, ReplaceMemberErrors) {
     auto disk = ublkpp::make_craft_disk_local(boost::uuids::random_generator()(), 3, 4096, uint64_t{64} << 20);
     auto const states = ublkpp::craft_disk::member_states(*disk);
