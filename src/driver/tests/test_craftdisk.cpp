@@ -4,6 +4,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -125,6 +126,44 @@ TEST(CraftDisk, OnRingDepthWriteReadRoundTrip) {
     // Drain any still-detached legs (a read fires keep_alives at the replicas it did not serve) before the mock's
     // io_uring is exited, so no queued SQE outlives its coroutine frame. All delays are 0, so this returns at once.
     (void)mock.poll(1 << 20, std::chrono::milliseconds{100});
+}
+
+// A replica move on a live disk: the slot's member is swapped, it is untrusted until it reports that it caught up,
+// then serves again. The in-process cluster can only re-point a slot at one of its own replicas, which is enough to
+// drive the whole swap path (TCP builds a new proxy instead; craft_client tests that builder).
+TEST(CraftDisk, ReplaceMemberOnALiveDisk) {
+    auto disk = ublkpp::make_craft_disk_local(boost::uuids::random_generator()(), 3, 4096, uint64_t{64} << 20);
+    auto states = ublkpp::craft_disk::member_states(*disk);
+    ASSERT_EQ(states.size(), 3u);
+    for (auto const& s : states)
+        EXPECT_TRUE(s.caught_up);
+
+    auto const moved = states[2].id;
+    ASSERT_FALSE(ublkpp::craft_disk::replace_member(*disk, moved, {.id = moved, .addr = "local"}));
+    states = ublkpp::craft_disk::member_states(*disk);
+    EXPECT_EQ(states[2].id, moved);
+    // The in-process replica already holds every write, so it may report its commit point (and be trusted again)
+    // as soon as any keep_alive lands; the routing gate itself is covered by craft_client's tests. Here, check that
+    // an idle probe drives the new member back to caught-up.
+    for (int i = 0; i < 200 && !ublkpp::craft_disk::member_states(*disk)[2].caught_up; ++i) {
+        disk->probe_tick(nullptr);
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+    EXPECT_TRUE(ublkpp::craft_disk::member_states(*disk)[2].caught_up);
+}
+
+TEST(CraftDisk, ReplaceMemberErrors) {
+    auto disk = ublkpp::make_craft_disk_local(boost::uuids::random_generator()(), 3, 4096, uint64_t{64} << 20);
+    auto const states = ublkpp::craft_disk::member_states(*disk);
+    auto const stranger = boost::uuids::random_generator()();
+    EXPECT_EQ(ublkpp::craft_disk::replace_member(*disk, stranger, {.id = states[0].id, .addr = "local"}),
+              std::make_error_condition(std::errc::no_such_device));
+    EXPECT_EQ(ublkpp::craft_disk::replace_member(*disk, states[0].id, {.id = stranger, .addr = "local"}),
+              std::make_error_condition(std::errc::operation_not_supported))
+        << "the in-process cluster has no replica with that id";
+    EXPECT_EQ(ublkpp::craft_disk::replace_member(*disk, states[0].id, {.id = states[1].id, .addr = "local"}),
+              std::make_error_condition(std::errc::invalid_argument))
+        << "member 1 would be in the set twice";
 }
 
 int main(int argc, char* argv[]) {

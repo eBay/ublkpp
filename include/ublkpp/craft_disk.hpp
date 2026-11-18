@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include <ublkpp/drivers.hpp> // disk_handle
@@ -40,5 +41,27 @@ disk_handle make_craft_disk_local(craft::volume_id_t vol_id, uint32_t n = 3, uin
 // connection to it AUTH first, fail-closed; a refusal is final for this disk, so re-create it from fresh attach info.
 disk_handle make_craft_disk_tcp(std::vector< craft::replica_endpoint > members, craft::volume_id_t vol_id,
                                 uint64_t client_token = k_craft_default_token);
+
+namespace craft_disk {
+
+// A replica move while the device serves IO: member `old_id` is replaced by `member` (its id, "host:port" and
+// credential), keeping the same slot. Writes issued from now on reach the new member; it serves reads only once it
+// has caught up through server-side resync (until then reads route around it). IO in flight to the old member
+// finishes there. Safe to call from any thread while the queues run, but not concurrently with itself for the same
+// disk. Errors: invalid_argument if `disk` is not a craft disk or `member` is already another member;
+// no_such_device if `old_id` is not a member; operation_not_supported if the disk's transport cannot reach a new
+// endpoint (the in-process reference cluster only knows its own replicas).
+std::error_condition replace_member(ublk_disk& disk, craft::peer_id_t const& old_id,
+                                    craft::replica_endpoint const& member);
+
+// One entry per member slot: the member's id and whether it has caught up (serves reads for everything it should).
+// Empty if `disk` is not a craft disk. For resync status reporting.
+struct member_state {
+    craft::peer_id_t id;
+    bool caught_up{false};
+};
+std::vector< member_state > member_states(ublk_disk const& disk);
+
+} // namespace craft_disk
 
 } // namespace ublkpp
