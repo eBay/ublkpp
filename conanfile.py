@@ -10,7 +10,7 @@ required_conan_version = ">=2.0"
 
 class UBlkPPConan(ConanFile):
     name = "ublkpp"
-    version = "0.40.0"
+    version = "0.41.0"
 
     homepage = "https://github.com/ebay/ublkpp"
     description = "C++23 library providing RAID support for Linux userspace block (ublk) driver"
@@ -73,7 +73,7 @@ class UBlkPPConan(ConanFile):
 
         self.requires("isa-l/2.30.0")
         self.requires("ublksrv/nbi.1.5.0.2", transitive_headers=True)
-        self.requires("craft_client/[^0.5]@oss/dev", transitive_headers=True)
+        self.requires("craft_client/[^0.6]@oss/dev", transitive_headers=True)
 
     def layout(self):
         self.folders.source = "."

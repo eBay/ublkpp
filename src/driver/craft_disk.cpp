@@ -4,6 +4,8 @@
 #include <bit>
 #include <cerrno>
 #include <cstddef>
+#include <functional>
+#include <memory>
 #include <stdexcept>
 
 #include <boost/uuid/uuid_io.hpp>
@@ -59,10 +61,16 @@ public:
     // `client` is already logged in (so capacity/lba_size are known). `transport` is the opaque cluster handle
     // that owns the replicas + the transport; it is held as a keep-alive and must outlive the client (see the
     // member order below).
-    CraftDisk(std::shared_ptr< void > transport, craft::client_handle client, craft::volume_id_t vol_id) :
+    // Builds the backend for a member that replaces `old_id` (a replica move), from the same transport.
+    using backend_maker = std::function< std::shared_ptr< craft::craft_replica >(craft::peer_id_t const& old_id,
+                                                                                 craft::replica_endpoint const&) >;
+
+    CraftDisk(std::shared_ptr< void > transport, craft::client_handle client, craft::volume_id_t vol_id,
+              backend_maker make_backend) :
             ublk_disk(),
             _transport(std::move(transport)),
             _client(std::move(client)),
+            _make_backend(std::move(make_backend)),
             _id_str(boost::uuids::to_string(vol_id)) {
         if (!_client) throw std::runtime_error("craft_disk: null client");
 
@@ -178,11 +186,51 @@ public:
         craft::drive_keepalives(_client, q ? q->ring_ptr : nullptr);
     }
 
+    std::error_condition replace_member(craft::peer_id_t const& old_id, craft::replica_endpoint const& member) {
+        // Validate against the client's members BEFORE building a backend: the TCP maker re-points the transport's
+        // slot, so a swap the client then rejects would leave the transport and the client disagreeing.
+        auto const ids = craft::member_ids(_client);
+        if (std::find(ids.begin(), ids.end(), old_id) == ids.end())
+            return std::make_error_condition(std::errc::no_such_device);
+        for (auto const& id : ids)
+            if (id == member.id && id != old_id) return std::make_error_condition(std::errc::invalid_argument);
+        // The TCP maker parses member.addr ("host:port") and throws on a malformed one; replace_member reports
+        // errors as codes only (craft_disk.hpp), and its caller is a health-check thread, so a bad address from
+        // the control plane must not escape as an exception (std::terminate would take the whole device down).
+        auto backend = std::shared_ptr< craft::craft_replica >{};
+        try {
+            backend = _make_backend ? _make_backend(old_id, member) : nullptr;
+        } catch (std::exception const& e) {
+            DLOGE("craft_disk [vol={}] replace member {}: cannot build a backend for {}: {}", _id_str,
+                  boost::uuids::to_string(old_id), member.addr, e.what())
+            return std::make_error_condition(std::errc::invalid_argument);
+        }
+        if (!backend) return std::make_error_condition(std::errc::operation_not_supported);
+        auto const err = craft::replace_member(_client, old_id, std::move(backend));
+        if (err) {
+            DLOGW("craft_disk [vol={}] replace member {} -> {} ({}) failed: {}", _id_str,
+                  boost::uuids::to_string(old_id), boost::uuids::to_string(member.id), member.addr, err.message())
+        } else {
+            DLOGI("craft_disk [vol={}] replaced member {} -> {} ({})", _id_str, boost::uuids::to_string(old_id),
+                  boost::uuids::to_string(member.id), member.addr)
+        }
+        return err;
+    }
+
+    std::vector< craft_disk::member_state > member_states() const {
+        std::vector< craft_disk::member_state > out;
+        auto const ids = craft::member_ids(_client);
+        for (std::size_t i = 0; i < ids.size(); ++i)
+            out.push_back({ids[i], craft::route_caught_up(_client, i)});
+        return out;
+    }
+
 private:
     // TEARDOWN ORDER (members destroyed in reverse of declaration): _client first (releases its replica refs),
     // then _transport (the cluster handle drains the transport's worker pools while it still owns every replica).
     std::shared_ptr< void > _transport; // opaque cluster keep-alive; must outlive _client
     craft::client_handle _client;
+    backend_maker _make_backend; // null: the transport cannot add a member
     std::string _id_str;
 };
 
@@ -219,7 +267,19 @@ disk_handle make_craft_disk_local(craft::volume_id_t vol_id, uint32_t n, uint32_
     auto cluster = craft::make_local_cluster(vol_id, n, page_size, capacity, max_tx);
     auto client = login_or_throw(craft::make_client(craft::backends(cluster), /*leader=*/0, aggregate_inflight()),
                                  client_token, "make_craft_disk_local");
-    return std::make_shared< CraftDisk >(std::static_pointer_cast< void >(cluster), std::move(client), vol_id);
+    // The in-process cluster has a fixed set of replicas: a "new" member can only be one of them (re-pointing a
+    // slot at it), which is what the reference model can serve. Weak: the disk already owns the cluster.
+    std::weak_ptr< craft::local_cluster > weak = cluster;
+    auto make_backend = [weak](craft::peer_id_t const&,
+                               craft::replica_endpoint const& m) -> std::shared_ptr< craft::craft_replica > {
+        auto c = weak.lock();
+        if (!c) return nullptr;
+        for (auto const& b : craft::backends(c))
+            if (craft::backend_id(b) == m.id) return b;
+        return nullptr;
+    };
+    return std::make_shared< CraftDisk >(std::static_pointer_cast< void >(cluster), std::move(client), vol_id,
+                                         std::move(make_backend));
 }
 
 disk_handle make_craft_disk_tcp(std::vector< craft::replica_endpoint > members, craft::volume_id_t vol_id,
@@ -228,7 +288,30 @@ disk_handle make_craft_disk_tcp(std::vector< craft::replica_endpoint > members, 
     auto cluster = craft::make_tcp_cluster(members, vol_id);
     auto client = login_or_throw(craft::make_client(craft::backends(cluster), /*leader=*/0, aggregate_inflight()),
                                  client_token, "make_craft_disk_tcp");
-    return std::make_shared< CraftDisk >(std::static_pointer_cast< void >(cluster), std::move(client), vol_id);
+    std::weak_ptr< craft::tcp_cluster > weak = cluster;
+    auto make_backend = [weak](craft::peer_id_t const& old_id,
+                               craft::replica_endpoint const& m) -> std::shared_ptr< craft::craft_replica > {
+        auto c = weak.lock();
+        return c ? craft::replace_tcp_member(c, old_id, m) : nullptr;
+    };
+    return std::make_shared< CraftDisk >(std::static_pointer_cast< void >(cluster), std::move(client), vol_id,
+                                         std::move(make_backend));
 }
+
+namespace craft_disk {
+
+std::error_condition replace_member(ublk_disk& disk, craft::peer_id_t const& old_id,
+                                    craft::replica_endpoint const& member) {
+    auto* const cd = dynamic_cast< CraftDisk* >(&disk);
+    if (!cd) return std::make_error_condition(std::errc::invalid_argument);
+    return cd->replace_member(old_id, member);
+}
+
+std::vector< member_state > member_states(ublk_disk const& disk) {
+    auto const* const cd = dynamic_cast< CraftDisk const* >(&disk);
+    return cd ? cd->member_states() : std::vector< member_state >{};
+}
+
+} // namespace craft_disk
 
 } // namespace ublkpp
