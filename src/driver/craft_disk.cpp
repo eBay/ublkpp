@@ -194,7 +194,17 @@ public:
             return std::make_error_condition(std::errc::no_such_device);
         for (auto const& id : ids)
             if (id == member.id && id != old_id) return std::make_error_condition(std::errc::invalid_argument);
-        auto backend = _make_backend ? _make_backend(old_id, member) : nullptr;
+        // The TCP maker parses member.addr ("host:port") and throws on a malformed one; replace_member reports
+        // errors as codes only (craft_disk.hpp), and its caller is a health-check thread, so a bad address from
+        // the control plane must not escape as an exception (std::terminate would take the whole device down).
+        auto backend = std::shared_ptr< craft::craft_replica >{};
+        try {
+            backend = _make_backend ? _make_backend(old_id, member) : nullptr;
+        } catch (std::exception const& e) {
+            DLOGE("craft_disk [vol={}] replace member {}: cannot build a backend for {}: {}", _id_str,
+                  boost::uuids::to_string(old_id), member.addr, e.what())
+            return std::make_error_condition(std::errc::invalid_argument);
+        }
         if (!backend) return std::make_error_condition(std::errc::operation_not_supported);
         auto const err = craft::replace_member(_client, old_id, std::move(backend));
         if (err) {

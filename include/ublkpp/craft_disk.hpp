@@ -48,9 +48,12 @@ namespace craft_disk {
 // credential), keeping the same slot. Writes issued from now on reach the new member; it serves reads only once it
 // has caught up through server-side resync (until then reads route around it). IO in flight to the old member
 // finishes there. Safe to call from any thread while the queues run, but not concurrently with itself for the same
-// disk. Errors: invalid_argument if `disk` is not a craft disk or `member` is already another member;
-// no_such_device if `old_id` is not a member; operation_not_supported if the disk's transport cannot reach a new
-// endpoint (the in-process reference cluster only knows its own replicas).
+// disk. Never throws; errors are returned:
+//   invalid_argument        `disk` is not a craft disk, `member` is already another member, or `member.addr` is not
+//                           a valid "host:port" for the TCP transport;
+//   no_such_device          `old_id` is not a member;
+//   operation_not_supported the disk's transport cannot reach a new endpoint (the in-process reference cluster only
+//                           knows its own replicas).
 std::error_condition replace_member(ublk_disk& disk, craft::peer_id_t const& old_id,
                                     craft::replica_endpoint const& member);
 
