@@ -24,6 +24,7 @@ target_sources(test_craftdisk PRIVATE
    test_craftdisk.cpp
   $<TARGET_OBJECTS:craft_disk>
   $<TARGET_OBJECTS:ublk_disk>
+  $<TARGET_OBJECTS:ublk_metrics>
   $<TARGET_OBJECTS:logging>
 )
 target_link_libraries (test_craftdisk

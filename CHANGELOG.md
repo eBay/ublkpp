@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.42.0] - Unreleased
+
+### Added
+
+- **CRAFT disk metrics** (`ublk_craft_*` gauges, entity = the disk's vol_id, label `parent_id`): the client's commit
+  frontier (`ublk_craft_commit_lsn`), the lowest member `commit_lsn` (`ublk_craft_all_committed_lsn`), the member
+  count (`ublk_craft_members`) and the members still catching up through server-side resync
+  (`ublk_craft_members_catching_up`). They are sampled when metrics are gathered, never on the IO path. Opt in by
+  passing a `parent_id` (normally the volume id) to `make_craft_disk_tcp` / `make_craft_disk_local`, as RAID1 does.
+
 ## [0.40.0] - Unreleased
 
 ### Fixed

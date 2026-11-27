@@ -10,11 +10,13 @@
 #include <gtest/gtest.h>
 
 #include <boost/uuid/random_generator.hpp>
+#include <boost/uuid/uuid_io.hpp>
 #include <sisl/logging/logging.h>
 #include <sisl/options/options.h>
 
 #include "ublkpp/craft_disk.hpp"
 #include "ublkpp/lib/ublk_disk.hpp"
+#include "metrics/ublk_craft_metrics.hpp"
 #include "tests/mock_ublksrv/mock_ublksrv.hpp" // drive async_iov over a real io_uring, no kernel/ublk module
 
 SISL_LOGGING_INIT(ublk_drivers)
@@ -230,4 +232,41 @@ int main(int argc, char* argv[]) {
     SISL_OPTIONS_LOAD(parsed_argc, argv, logging);
     sisl::logging::SetLogger(std::string(argv[0]));
     return RUN_ALL_TESTS();
+}
+
+// The CRAFT gauges are sampled when the metrics are gathered (a scrape), not on the IO path.
+TEST(CraftDiskMetrics, GaugesAreSampledAtGather) {
+    ublkpp::UblkCraftMetrics::snapshot cur{
+        .commit_lsn = 41, .all_committed_lsn = 7, .members = 3, .members_catching_up = 1};
+    ublkpp::UblkCraftMetrics m{"vol-parent", "craft-metrics-test-1", [&] { return cur; }};
+    auto gauge = [&](std::string const& desc) -> int64_t {
+        auto const j = m.get_result_in_json(true);
+        return j.at("Gauges").at(desc).get< int64_t >();
+    };
+    EXPECT_EQ(gauge("CRAFT client commit frontier (highest quorum-durable dLSN, -1 if none)"), 41);
+    EXPECT_EQ(gauge("Lowest commit_lsn across the CRAFT members (-1 if none)"), 7);
+    EXPECT_EQ(gauge("Number of CRAFT members"), 3);
+    EXPECT_EQ(gauge("CRAFT members still catching up (reads route around them)"), 1);
+    cur = {.commit_lsn = 42, .all_committed_lsn = 42, .members = 3, .members_catching_up = 0};
+    EXPECT_EQ(gauge("CRAFT members still catching up (reads route around them)"), 0) << "re-sampled on each gather";
+    EXPECT_EQ(gauge("Lowest commit_lsn across the CRAFT members (-1 if none)"), 42);
+}
+
+// A disk built with a parent id reports through the farm; one built without one registers nothing.
+TEST(CraftDiskMetrics, ADiskWithAParentIdRegistersItsGauges) {
+    auto const vol = boost::uuids::random_generator()();
+    auto const id = boost::uuids::to_string(vol);
+    auto has_entity = [&] {
+        return sisl::MetricsFarm::getInstance().get_result_in_json_string().find(id) != std::string::npos;
+    };
+    {
+        auto disk = ublkpp::make_craft_disk_local(vol, 3, 4096, uint64_t{64} << 20);
+        EXPECT_FALSE(has_entity());
+    }
+    {
+        auto disk = ublkpp::make_craft_disk_local(vol, 3, 4096, uint64_t{64} << 20, craft::wire::k_default_max_tx,
+                                                  ublkpp::k_craft_default_token, "vol-parent");
+        EXPECT_TRUE(has_entity());
+    }
+    EXPECT_FALSE(has_entity()) << "deregistered with the disk";
 }
