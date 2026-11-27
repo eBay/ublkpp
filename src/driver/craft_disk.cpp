@@ -23,6 +23,7 @@
 
 #include "lib/common.hpp"  // ilog2, SECTOR_SHIFT
 #include "lib/logging.hpp" // DLOG*
+#include "metrics/ublk_craft_metrics.hpp"
 
 namespace ublkpp {
 
@@ -65,8 +66,9 @@ public:
     using backend_maker = std::function< std::shared_ptr< craft::craft_replica >(craft::peer_id_t const& old_id,
                                                                                  craft::replica_endpoint const&) >;
 
+    // A non-empty `parent_id` (the volume) turns on this disk's Prometheus metrics, as for RAID1.
     CraftDisk(std::shared_ptr< void > transport, craft::client_handle client, craft::volume_id_t vol_id,
-              backend_maker make_backend) :
+              backend_maker make_backend, std::string const& parent_id = {}) :
             ublk_disk(),
             _transport(std::move(transport)),
             _client(std::move(client)),
@@ -104,6 +106,12 @@ public:
         // DISCARD/WRITE_ZEROES map onto a CRAFT zero write but need exact ublk_param_discard geometry; disabled
         // for this first cut (also rejected defensively in async_iov). TODO: thin zero-write mapping.
         p.types &= ~UBLK_PARAM_TYPE_DISCARD;
+
+        if (!parent_id.empty()) { // GCOVR_EXCL_BR_LINE -- needs a metrics registry; not built in unit tests
+            // LCOV_EXCL_START
+            _metrics = std::make_unique< UblkCraftMetrics >(parent_id, _id_str, [this] { return metrics_sample(); });
+            // LCOV_EXCL_STOP
+        }
 
         DLOGI("craft_disk [vol={}] sectors={} lbs={} max_sectors={} term={}", _id_str, p.basic.dev_sectors, page_size,
               p.basic.max_sectors, craft::term(_client))
@@ -225,6 +233,18 @@ public:
         return out;
     }
 
+    // What the metrics report (each observer is safe while IO is in flight).
+    UblkCraftMetrics::snapshot metrics_sample() const {
+        UblkCraftMetrics::snapshot s;
+        s.commit_lsn = craft::commit_lsn(_client);
+        s.all_committed_lsn = craft::all_committed_lsn(_client);
+        for (auto const& m : member_states()) {
+            ++s.members;
+            if (!m.caught_up) ++s.members_catching_up;
+        }
+        return s;
+    }
+
 private:
     // TEARDOWN ORDER (members destroyed in reverse of declaration): _client first (releases its replica refs),
     // then _transport (the cluster handle drains the transport's worker pools while it still owns every replica).
@@ -232,6 +252,8 @@ private:
     craft::client_handle _client;
     backend_maker _make_backend; // null: the transport cannot add a member
     std::string _id_str;
+    // Declared last, so destroyed first: its gather callback reads _client.
+    std::unique_ptr< UblkCraftMetrics > _metrics;
 };
 
 // craft::make_client's `max_inflight` is the AGGREGATE in-flight bound across every queue, so a blk-mq driver
@@ -261,7 +283,7 @@ craft::client_handle login_or_throw(craft::client_handle client, uint64_t token,
 // ── factories: fold the builder in, log in, then hand the disk a logged-in client + the cluster keep-alive ──
 
 disk_handle make_craft_disk_local(craft::volume_id_t vol_id, uint32_t n, uint32_t page_size, uint64_t capacity,
-                                  uint32_t max_tx, uint64_t client_token) {
+                                  uint32_t max_tx, uint64_t client_token, std::string const& parent_id) {
     // `max_tx` configures the in-process volume here; the disk reads it back via craft::max_tx(client) after
     // login, so the device geometry is single-sourced from the client, never re-picked.
     auto cluster = craft::make_local_cluster(vol_id, n, page_size, capacity, max_tx);
@@ -279,11 +301,11 @@ disk_handle make_craft_disk_local(craft::volume_id_t vol_id, uint32_t n, uint32_
         return nullptr;
     };
     return std::make_shared< CraftDisk >(std::static_pointer_cast< void >(cluster), std::move(client), vol_id,
-                                         std::move(make_backend));
+                                         std::move(make_backend), parent_id);
 }
 
 disk_handle make_craft_disk_tcp(std::vector< craft::replica_endpoint > members, craft::volume_id_t vol_id,
-                                uint64_t client_token) {
+                                uint64_t client_token, std::string const& parent_id) {
     // No max_tx here: the SERVER's volume defines it, and the disk reads it via craft::max_tx(client) after login.
     auto cluster = craft::make_tcp_cluster(members, vol_id);
     auto client = login_or_throw(craft::make_client(craft::backends(cluster), /*leader=*/0, aggregate_inflight()),
@@ -295,7 +317,7 @@ disk_handle make_craft_disk_tcp(std::vector< craft::replica_endpoint > members, 
         return c ? craft::replace_tcp_member(c, old_id, m) : nullptr;
     };
     return std::make_shared< CraftDisk >(std::static_pointer_cast< void >(cluster), std::move(client), vol_id,
-                                         std::move(make_backend));
+                                         std::move(make_backend), parent_id);
 }
 
 namespace craft_disk {
