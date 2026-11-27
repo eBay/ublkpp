@@ -16,6 +16,7 @@
 
 #include "ublkpp/craft_disk.hpp"
 #include "ublkpp/lib/ublk_disk.hpp"
+#include "metrics/ublk_craft_member_metrics.hpp"
 #include "metrics/ublk_craft_metrics.hpp"
 #include "tests/mock_ublksrv/mock_ublksrv.hpp" // drive async_iov over a real io_uring, no kernel/ublk module
 
@@ -269,4 +270,31 @@ TEST(CraftDiskMetrics, ADiskWithAParentIdRegistersItsGauges) {
         EXPECT_TRUE(has_entity());
     }
     EXPECT_FALSE(has_entity()) << "deregistered with the disk";
+}
+
+// Per-member latency groups: one per member slot, entity "<disk>:m<slot>", registered with a parent id only.
+TEST(CraftDiskMetrics, ADiskWithAParentIdReportsPerMemberLatency) {
+    auto const vol = boost::uuids::random_generator()();
+    auto const id = boost::uuids::to_string(vol);
+    auto farm = [] { return sisl::MetricsFarm::getInstance().get_result_in_json_string(); };
+    {
+        auto disk = ublkpp::make_craft_disk_local(vol, 3, 4096, uint64_t{64} << 20, craft::wire::k_default_max_tx,
+                                                  ublkpp::k_craft_default_token, "vol-parent");
+        for (int m = 0; m < 3; ++m)
+            EXPECT_NE(farm().find(id + ":m" + std::to_string(m)), std::string::npos) << "member slot " << m;
+        // The idle probe drives a keep_alive to every member: each slot records a sample.
+        disk->probe_tick(nullptr);
+    }
+    EXPECT_EQ(farm().find(id + ":m0"), std::string::npos) << "deregistered once the disk and its legs are gone";
+}
+
+TEST(CraftDiskMetrics, MemberLatencyRecordsSuccessesAndCountsFailures) {
+    ublkpp::UblkCraftMemberMetrics m{"vol-parent", "craft-member-test", 1};
+    m.record(ublkpp::UblkCraftMemberMetrics::op::write, 120, true);
+    m.record(ublkpp::UblkCraftMemberMetrics::op::read, 80, true);
+    m.record(ublkpp::UblkCraftMemberMetrics::op::keep_alive, 40, true);
+    m.record(ublkpp::UblkCraftMemberMetrics::op::write, 5000000, false);
+    auto const j = m.get_result_in_json(true);
+    EXPECT_EQ(j.at("Counters").at("CRAFT member legs that failed (error, timeout or unreachable)").get< int64_t >(), 1);
+    EXPECT_NE(j.dump().find("CRAFT member write latency in microseconds"), std::string::npos) << j.dump();
 }
