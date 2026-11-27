@@ -23,6 +23,7 @@
 
 #include "lib/common.hpp"  // ilog2, SECTOR_SHIFT
 #include "lib/logging.hpp" // DLOG*
+#include "metrics/ublk_craft_member_metrics.hpp"
 #include "metrics/ublk_craft_metrics.hpp"
 
 namespace ublkpp {
@@ -110,6 +111,18 @@ public:
         if (!parent_id.empty()) { // GCOVR_EXCL_BR_LINE -- needs a metrics registry; not built in unit tests
             // LCOV_EXCL_START
             _metrics = std::make_unique< UblkCraftMetrics >(parent_id, _id_str, [this] { return metrics_sample(); });
+            // Per-member latency. The observer owns the groups: a quorum straggler's leg can complete after this
+            // disk is gone (it holds the client's route map, which holds the observer), so nothing here is borrowed.
+            auto members = std::make_shared< std::vector< std::unique_ptr< UblkCraftMemberMetrics > > >();
+            for (std::size_t slot = 0; slot < craft::replica_count(_client); ++slot)
+                members->push_back(std::make_unique< UblkCraftMemberMetrics >(parent_id, _id_str, slot));
+            craft::set_leg_observer(_client, [members](craft::leg_sample const& s) {
+                if (s.member >= members->size()) return;
+                auto const o = s.op == craft::leg_op::write ? UblkCraftMemberMetrics::op::write
+                    : s.op == craft::leg_op::read           ? UblkCraftMemberMetrics::op::read
+                                                            : UblkCraftMemberMetrics::op::keep_alive;
+                (*members)[s.member]->record(o, s.usec, s.ok);
+            });
             // LCOV_EXCL_STOP
         }
 

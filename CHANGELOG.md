@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.43.0] - Unreleased
+
+### Added
+
+- **CRAFT per-member latency** (requires `craft_client` 0.7, `craft::set_leg_observer`). With a `parent_id`, each member
+  slot gets a metrics group (entity `<vol_id>:m<slot>`, label `parent_id`) with the histograms
+  `ublk_craft_member_write_latency_us`, `ublk_craft_member_read_latency_us` and
+  `ublk_craft_member_keepalive_latency_us`, and `ublk_craft_member_errors_total`. A write's slower legs are reported
+  after the quorum ack, so a slow member shows here even when the volume's latency looks fine. A failed leg counts as
+  an error and stays out of the latency.
+
 ## [0.42.0] - Unreleased
 
 ### Added
